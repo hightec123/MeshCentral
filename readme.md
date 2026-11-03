@@ -1,5 +1,10 @@
 # MeshCentral
 
+> **Rust rewrite development branch:** the new Rust server and React/Vite console
+> live alongside the original implementation. Start with [the Rust rewrite guide](docs/rust/README.md).
+> This is a local development preview; agent enrollment and remote sessions are not implemented yet.
+> The original MeshCentral source, agents, and Apache-2.0 license are retained below.
+
 ## Table of Contents
 
 [About](#about)

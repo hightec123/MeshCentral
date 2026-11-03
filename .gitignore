@@ -314,3 +314,11 @@ __pycache__/
 docs/__pycache__/
 docs/env/
 docker-compose.yaml
+
+# Rust rewrite and React/Vite frontend
+/target/
+/web/dist/
+/web/test-results/
+/web/playwright-report/
+/web/*.tsbuildinfo
+/.local/
