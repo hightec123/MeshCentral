@@ -9,22 +9,26 @@ for an installed MeshCentral server.
 
 Implemented:
 
-- Axum/Tokio HTTP console with liveness, capabilities, and persistent device inventory.
-- React console reading that API, with search, filters, refresh, and error recovery.
-- Production frontend assets served directly by Rust; Vite proxies the API in development.
+- Axum/Tokio console and React UI with persistent inventory, search, filters, and
+  device names, notes, tags, system information, disconnect, and offline removal.
+- Argon2id operator passwords, revocable cookie sessions, CSRF/origin protection,
+  account management, password changes, and administrator/operator/viewer roles.
+- Device groups, group-scoped permissions, explicit certificate fingerprint
+  approval, pinned agent configuration downloads, audit history, and session closure.
 - Native TLS/WebSocket listener with persistent server keys, mutual RSA/SHA-384
   proofs, fresh nonces, exact node/mesh allowlisting, and real online/offline presence.
-- Bounded handshake decoding (commands 1–5, 30, 31), loopback-only binding,
-  browser-origin/Host restrictions, disabled remote sessions, and local verification.
+- Existing-agent core distribution, system telemetry, authorized terminal, file
+  management/transfer, and desktop viewing with optional input controls. Live
+  acceptance covers the unmodified stock macOS ARM64 agent; desktop input itself
+  has not been exercised against the host's actual desktop.
 
 The first live-agent milestone passed with an unmodified official macOS ARM64
 MeshAgent: authenticated connection, visible online in the console, offline on
 disconnect, and automatic reconnect after restarting Rust with stable identities.
-See [the lab guide](LAB.md) and [validation evidence](VALIDATION.md).
-
-Not implemented: operator accounts/RBAC, production migration, remote sessions,
-agent/core distribution, or legacy PKCS#7 proof wrappers. Only raw RSA signatures
-from explicitly approved lab identities are supported in this milestone.
+The core-management milestone additionally passed terminal output, byte-exact file
+transfer, desktop rendering, authorization, audit, and session cleanup. See
+[the lab guide](LAB.md), [validation evidence](VALIDATION.md), and the
+[full-parity feature ledger](FEATURES.md) for implemented behavior and remaining work.
 
 ## Run the preview
 
@@ -36,13 +40,23 @@ still belongs to the upstream Node.js implementation.
 ```sh
 npm --prefix web ci
 npm --prefix web run build
+node scripts/build-agent-cores.cjs
+cargo run --locked -p meshcentral-server -- init-user admin < /path/to/private-password-file
 cargo run --locked -p meshcentral-server
 ```
 
-Open <http://127.0.0.1:3000>. An uninitialized workspace has zero devices and no
-agent listener. Follow [LAB.md](LAB.md) to initialize an explicit lab policy.
+Use a private password file containing a 12–128-byte password, with mode 0600.
+The CLI accepts it on standard input so it does not appear in process arguments.
+Bootstrap runs only before the first operator exists and requires the server to
+be stopped. The browser offers no public registration or unauthenticated reset.
+
+Open <http://127.0.0.1:3000> and sign in. An uninitialized workspace has zero devices
+and no agent listener. Follow [LAB.md](LAB.md) to initialize an explicit lab policy.
 An initialized lab accepts native agents at `wss://127.0.0.1:8443/agent.ashx`.
-The HTTP console's `/agent.ashx` and all remote-session endpoints stay disabled.
+The HTTP console's `/agent.ashx` stays disabled; native relays use the TLS listener.
+Bundled cores are built from retained upstream source. Core changes do not modify
+the native executable. Rebuild cores after changing retained agent modules, then
+restart Rust to load them.
 
 For frontend hot reload, keep the Rust process running and use another terminal:
 
@@ -59,10 +73,13 @@ Configuration:
 | `MCR_LISTEN` | `127.0.0.1:3000` | HTTP bind address; only loopback IPs are accepted |
 | `MCR_AGENT_LISTEN` | `127.0.0.1:8443` | Native TLS/WebSocket listener, also loopback only |
 | `MCR_DATA_DIR` | `.local/server` | Private server identity, admission policy, and inventory |
+| `MCR_CORE_DIR` | `.local/cores` | Optional per-platform core bundles; absent cores disable remote capabilities |
 | `MCR_WEB_DIR` | `web/dist` | Frontend build directory, relative to the process working directory |
 | `RUST_LOG` | `info` | Rust log filtering |
 
-Binding to all interfaces is unavailable before operator authentication. Native
+Both listeners deliberately remain loopback-only in this development preview.
+The console uses HTTP locally; production HTTPS, secure-cookie deployment,
+recovery, and migration remain separate release gates. Native
 agent sockets reject browser Origin headers, and the console rejects non-loopback
 Host headers to prevent browser DNS rebinding. State directories/files require
 0700/0600 permissions on Unix; a process lock prevents concurrent state writers.
@@ -81,14 +98,23 @@ npm --prefix web run test:e2e
 
 Rust tests include a real local TLS/WebSocket exchange and rejection cases for
 replay, tampering, TLS hash/identity mismatch, unauthorized nodes/meshes, duplicate
-commands, and browser-origin requests. They also check persistence and lab CLI
-idempotence. Browser tests run the built frontend on a separate Rust process at
-`127.0.0.1:3100` with isolated, uninitialized state, on desktop and mobile viewport profiles. They cover the real
-empty workspace and unavailable enrollment, error recovery, stale-data labeling,
-keyboard navigation, and search/filter behavior with explicitly injected test-only
-inventory. Screenshots and failure traces are saved under `web/test-results/`.
+commands, in-flight revocation, and browser-origin requests. They also check
+persistence, CLI idempotence, scoped permissions, password/session revocation,
+CSRF, and relay ownership, ticket reuse, expiry, and disconnect cleanup.
+Browser tests run the built frontend on a separate Rust process at
+`127.0.0.1:3100` with isolated operator accounts and no native agent, on desktop and
+mobile viewports. They cover sign-in/out, account roles, password changes, empty
+workspace, error recovery, keyboard navigation, and injected test-only inventory.
+Screenshots and failure traces are saved under `web/test-results/`.
 Run `cargo fetch --locked` first if using the browser runner on a fresh Rust cache;
 its server command deliberately uses `--offline`.
+
+`node scripts/verify-live-lab.cjs` is a separate, explicit local acceptance check.
+It requires this workspace's disposable agent, private `.local/operator-login.json`,
+and the recorded expected NodeID. It executes a harmless terminal marker, writes
+and deletes its own scratch file, views desktop images without sending input,
+restores device metadata, and checks audit, cleanup, and mobile layout. It is not
+run by the ordinary browser suite and must never be aimed at production.
 
 Regenerate protocol fixtures after an intentional upstream reference update:
 

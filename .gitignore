@@ -322,3 +322,4 @@ docker-compose.yaml
 /web/playwright-report/
 /web/*.tsbuildinfo
 /.local/
+/web/public/vendor/

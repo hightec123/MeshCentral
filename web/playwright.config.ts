@@ -19,7 +19,7 @@ export default defineConfig({
     { name: 'mobile', use: { ...devices['Pixel 7'] } },
   ],
   webServer: {
-    command: 'cargo run --locked --offline -p meshcentral-server',
+    command: 'node web/tests/start-server.cjs',
     cwd: root,
     url: 'http://127.0.0.1:3100/healthz',
     env: { MCR_LISTEN: '127.0.0.1:3100', MCR_WEB_DIR: join(root, 'web/dist'), MCR_DATA_DIR: join(root, '.local/browser-tests-empty') },

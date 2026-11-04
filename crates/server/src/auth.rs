@@ -18,6 +18,15 @@ pub struct AdmissionPolicy {
     pub mesh_id_hex: String,
     pub group_name: String,
     pub allowed_node_ids_hex: Vec<String>,
+    #[serde(default)]
+    pub additional_groups: Vec<AgentGroup>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AgentGroup {
+    pub mesh_id_hex: String,
+    pub group_name: String,
+    pub allowed_node_ids_hex: Vec<String>,
 }
 
 impl AdmissionPolicy {
@@ -30,6 +39,7 @@ impl AdmissionPolicy {
             mesh_id_hex: hex(&mesh_id),
             group_name: "Rust lab".into(),
             allowed_node_ids_hex: vec![hex(&node_id)],
+            additional_groups: vec![],
         })
     }
 
@@ -43,13 +53,57 @@ impl AdmissionPolicy {
             "invalid group name"
         );
         ensure!(
-            !self.allowed_node_ids_hex.is_empty() && self.allowed_node_ids_hex.len() <= 32,
-            "lab policy requires 1–32 explicitly allowed nodes"
+            self.allowed_node_ids_hex.len() <= 32,
+            "lab policy allows at most 32 explicitly allowed nodes"
         );
         for node in &self.allowed_node_ids_hex {
             decode_hex::<48>(node)?;
         }
+        ensure!(self.additional_groups.len() <= 63, "too many groups");
+        let mut ids = std::collections::BTreeSet::new();
+        for group in self.groups() {
+            decode_hex::<48>(&group.mesh_id_hex)?;
+            ensure!(
+                ids.insert(group.mesh_id_hex.to_ascii_uppercase()),
+                "duplicate mesh ID"
+            );
+            ensure!(
+                !group.group_name.is_empty()
+                    && group.group_name.len() <= 64
+                    && !group.group_name.chars().any(char::is_control),
+                "invalid group name"
+            );
+            ensure!(
+                group.allowed_node_ids_hex.len() <= 32,
+                "too many group nodes"
+            );
+            for node in group.allowed_node_ids_hex {
+                decode_hex::<48>(&node)?;
+            }
+        }
         Ok(())
+    }
+
+    pub fn groups(&self) -> Vec<AgentGroup> {
+        let mut groups = vec![AgentGroup {
+            mesh_id_hex: self.mesh_id_hex.clone(),
+            group_name: self.group_name.clone(),
+            allowed_node_ids_hex: self.allowed_node_ids_hex.clone(),
+        }];
+        groups.extend(self.additional_groups.clone());
+        groups
+    }
+    pub fn group(&self, id: &str) -> Option<AgentGroup> {
+        self.groups()
+            .into_iter()
+            .find(|g| g.mesh_id_hex.eq_ignore_ascii_case(id))
+    }
+    pub fn permits(&self, mesh: &str, node: &str) -> bool {
+        self.group(mesh).is_some_and(|g| {
+            g.allowed_node_ids_hex
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(node))
+        })
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -87,6 +141,8 @@ pub struct AuthenticatedPeer {
     pub name: String,
     pub group: String,
     pub architecture: u32,
+    pub mesh_id_hex: String,
+    pub node_id_hex: String,
 }
 
 /// Single-use, per-connection state. Cached-server acknowledgment never bypasses
@@ -166,7 +222,7 @@ impl Handshake {
             }
             HandshakeFrame::AgentInfo(info) => {
                 ensure!(
-                    memcmp::eq(info.mesh_id, &decode_hex::<48>(&self.policy.mesh_id_hex)?),
+                    self.policy.group(&hex(info.mesh_id)).is_some(),
                     "mesh is not authorized"
                 );
                 self.metadata = Some(info.try_into()?);
@@ -193,13 +249,10 @@ impl Handshake {
         else {
             return Ok(None);
         };
-        ensure!(
-            memcmp::eq(
-                &metadata.mesh_id,
-                &decode_hex::<48>(&self.policy.mesh_id_hex)?
-            ),
-            "mesh is not authorized"
-        );
+        let group = self
+            .policy
+            .group(&hex(&metadata.mesh_id))
+            .ok_or_else(|| anyhow::anyhow!("mesh is not authorized"))?;
         let cert = X509::from_der(certificate)?;
         ensure!(cert.to_der()? == *certificate, "trailing certificate bytes");
         let public_key = cert.public_key()?;
@@ -210,7 +263,7 @@ impl Handshake {
         );
         let fingerprint = sha384(&public_key_der(&cert)?);
         ensure!(
-            self.policy
+            group
                 .allowed_node_ids_hex
                 .iter()
                 .any(|allowed| decode_hex::<48>(allowed)
@@ -238,8 +291,10 @@ impl Handshake {
             } else {
                 metadata.name.clone()
             },
-            group: self.policy.group_name.clone(),
+            group: group.group_name,
             architecture: metadata.architecture,
+            mesh_id_hex: hex(&metadata.mesh_id),
+            node_id_hex: hex(&fingerprint),
         }))
     }
 }

@@ -29,6 +29,11 @@ managed. Its primary surface is the device inventory, not a marketing dashboard.
 
 Review against the brief: a generic SaaS dashboard would introduce metric cards
 and sample activity. Here, a single inventory surface and real connection status
-take priority. Enrollment stays unavailable while authentication is unfinished.
+take priority. Sign-in protects the workspace. Administrators manage People,
+Groups, and Activity; operators manage their assigned groups; viewers see inventory
+without remote controls. Group configuration requires an administrator and explicit
+node fingerprint approval. The device dialog exposes Overview, Terminal, Files,
+and Desktop with connection status and explicit connect/disconnect controls.
+Desktop starts in view mode; input requires an explicit control checkbox.
 Search, filters, refresh, error recovery, and the capability explanation must work
 with keyboard input. Preserve visible focus and reduced-motion preferences.

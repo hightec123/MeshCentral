@@ -95,6 +95,10 @@ pub fn replace_json(path: &Path, value: &impl Serialize) -> Result<()> {
     rand_bytes(&mut random)?;
     let temporary = path.with_extension(format!("{:016x}.tmp", u64::from_be_bytes(random)));
     let bytes = serde_json::to_vec_pretty(value)?;
+    ensure!(
+        bytes.len() <= 1024 * 1024,
+        "state file exceeds the size limit"
+    );
     let result = (|| {
         write_new(&temporary, &bytes)?;
         fs::rename(&temporary, path)?;

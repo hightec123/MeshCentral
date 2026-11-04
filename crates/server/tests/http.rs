@@ -41,10 +41,10 @@ async fn liveness_does_not_claim_agent_readiness() {
 }
 
 #[tokio::test]
-async fn inventory_contains_no_fabricated_or_unverified_devices() {
+async fn inventory_is_not_publicly_readable() {
     let (status, inventory) = request("/api/v1/devices").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(inventory, json!({"devices": []}));
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(inventory["code"], "request_failed");
 }
 
 #[tokio::test]
@@ -101,9 +101,9 @@ fn development_server_rejects_network_exposure() {
 async fn browser_dns_rebinding_hosts_are_rejected() {
     for (host, status) in [
         ("attacker.example:3000", StatusCode::FORBIDDEN),
-        ("127.0.0.1:3000", StatusCode::OK),
-        ("localhost:3000", StatusCode::OK),
-        ("[::1]:3000", StatusCode::OK),
+        ("127.0.0.1:3000", StatusCode::UNAUTHORIZED),
+        ("localhost:3000", StatusCode::UNAUTHORIZED),
+        ("[::1]:3000", StatusCode::UNAUTHORIZED),
     ] {
         let response = app(PathBuf::from("nonexistent-web-build"))
             .oneshot(

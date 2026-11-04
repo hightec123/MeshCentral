@@ -3,7 +3,9 @@
 The completed lab runs on localhost, with a separate unmodified stock agent binary,
 configuration, database, and certificate identity. It does not install a service or
 repoint an existing managed device. Only the configured mesh and explicitly pinned
-agent public keys are admitted. Remote commands and core/binary updates are not sent.
+agent public keys are admitted. The lab now receives the retained upstream core
+and supports terminal, file operations and desktop viewing. Native binary updates
+are not implemented; the executable remains unchanged.
 
 ## Current workspace
 
@@ -14,6 +16,7 @@ The server and foreground agent were left running after acceptance testing:
 - Server state: `.local/server/`
 - Disposable agent: `.local/lab-agent/meshagent`, with adjacent `.msh` and `.db` files.
 - Local test evidence: `.local/evidence/` (screenshots and before/after JSON).
+- Private console credentials: `.local/operator-login.json` (mode 0600, never committed).
 
 After stopping these processes, start them again in separate terminals from the
 repository root:
@@ -74,8 +77,11 @@ the saved device remains in inventory and changes to offline.
    existing policy for an unknown node. Restore a missing existing server identity
    from backup instead of regenerating it.
 
-5. Start Rust and the foreground agent using the commands above. Open the console
-   and click **Refresh**. Expect one device in **Rust lab**, with its real hostname,
+5. Bootstrap an administrator while Rust is stopped using the `init-user` command
+   in [README.md](README.md). Generate core bundles with
+   `node scripts/build-agent-cores.cjs`. Start Rust and the foreground agent using
+   the commands above. Sign in to the console and click **Refresh**. Expect one
+   device in **Rust lab**, with its real hostname,
    platform and **Online** status. The console also polls every 15 seconds.
 
 ## Files and trust
@@ -85,6 +91,8 @@ the saved device remains in inventory and changes to offline.
 | `identity.json` | Persistent server agent certificate/key and separate TLS certificate/key |
 | `admission.json` | Exact mesh ID and explicitly allowed agent public-key fingerprints |
 | `inventory.json` | Saved device records; all records load offline until a fresh authenticated socket connects |
+| `operators.json` | User roles/group grants and Argon2id password hashes; sign-in sessions are memory-only |
+| `audit.json` | Last 500 account, group, device and remote-session lifecycle events; no file/terminal content |
 | `server.lock` | Exclusive process lock; a second writer/initializer is refused |
 
 State directories require mode 0700, files mode 0600 on Unix. Keep these files
@@ -95,6 +103,23 @@ published with the source.
 This milestone supports raw RSA/SHA-384 proofs with 2048–4096-bit agent keys and
 both supported TLS-hash forms. Legacy PKCS#7 proof envelopes are rejected. The
 specific live acceptance is macOS ARM64; Windows/Linux interoperability remains
-to be tested. Operator accounts/RBAC and remote sessions are not implemented, so
-both listeners are restricted to loopback. No host trust store or system service
+to be tested. Operator accounts/RBAC and remote sessions now work in the lab;
+both listeners remain restricted to loopback pending production deployment gates.
+No host trust store or system service
 configuration is changed.
+
+## Exercise remote operations
+
+Open a device and choose Terminal, Files or Desktop, then explicitly connect.
+The device must be online with its core ready, and your account must be an
+administrator or an operator assigned to that device's group. Viewers can read
+inventory and details but cannot edit or start remote sessions. Desktop begins
+in view mode; input is opt-in and has not been live-tested on this host.
+
+The repeatable `node scripts/verify-live-lab.cjs` helper requires the private
+credentials and previously recorded expected NodeID. It sends a harmless terminal
+marker and limits file writes to its own generated fixture inside
+`.local/lab-agent/acceptance/`. It verifies a byte-exact 40,000-byte round trip,
+deletes that fixture, views actual desktop images without input, restores device
+notes, and checks audit, session cleanup and mobile layout. The ordinary browser
+regression suite never connects to this live agent.

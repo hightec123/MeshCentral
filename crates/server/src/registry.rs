@@ -49,6 +49,7 @@ impl Registry {
         );
         for device in records.devices.values_mut() {
             device.status = DeviceStatus::Offline;
+            device.core_ready = false;
         }
         // Online is a property of a live, authenticated socket, never persisted truth.
         storage::replace_json(&path, &records)?;
@@ -89,15 +90,33 @@ impl Registry {
             5 | 6 | 24 | 25 | 26 | 27 | 28 | 30 | 32 | 37 | 40 => "Linux".to_string(),
             other => format!("Agent architecture {other}"),
         };
+        let previous = records.devices.get(&peer.node_id).cloned();
         records.devices.insert(
             peer.node_id.clone(),
             Device {
                 id: peer.node_id.clone(),
-                name: peer.name,
+                name: previous
+                    .as_ref()
+                    .and_then(|d| d.alias.clone())
+                    .unwrap_or_else(|| peer.name.clone()),
                 group: peer.group,
                 platform,
                 status: DeviceStatus::Online,
                 last_seen: Some(now()),
+                group_id: peer.mesh_id_hex,
+                node_id_hex: peer.node_id_hex,
+                hostname: peer.name,
+                alias: previous.as_ref().and_then(|d| d.alias.clone()),
+                notes: previous
+                    .as_ref()
+                    .map(|d| d.notes.clone())
+                    .unwrap_or_default(),
+                tags: previous
+                    .as_ref()
+                    .map(|d| d.tags.clone())
+                    .unwrap_or_default(),
+                details: previous.map(|d| d.details).unwrap_or_default(),
+                core_ready: false,
             },
         );
         storage::replace_json(&self.path, &records)?;
@@ -113,6 +132,81 @@ impl Registry {
             node: peer.node_id,
             session,
         })
+    }
+
+    pub fn device(&self, id: &str) -> Option<Device> {
+        self.lock().records.devices.get(id).cloned()
+    }
+    pub fn patch(
+        &self,
+        id: &str,
+        alias: Option<String>,
+        notes: String,
+        tags: Vec<String>,
+    ) -> Result<()> {
+        ensure!(
+            alias.as_ref().is_none_or(|n| !n.is_empty()
+                && n.len() <= 255
+                && !n.chars().any(char::is_control)),
+            "invalid device name"
+        );
+        ensure!(
+            notes.len() <= 8192
+                && tags.len() <= 16
+                && tags
+                    .iter()
+                    .all(|t| !t.is_empty() && t.len() <= 32 && !t.chars().any(char::is_control)),
+            "invalid notes or tags"
+        );
+        let mut inner = self.lock();
+        let mut next = inner.records.clone();
+        let device = next
+            .devices
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("device not found"))?;
+        device.alias = alias;
+        device.name = device
+            .alias
+            .clone()
+            .unwrap_or_else(|| device.hostname.clone());
+        device.notes = notes;
+        device.tags = tags;
+        storage::replace_json(&self.path, &next)?;
+        inner.records = next;
+        Ok(())
+    }
+    pub fn forget(&self, id: &str) -> Result<()> {
+        let mut inner = self.lock();
+        ensure!(
+            !inner.sessions.contains_key(id),
+            "disconnect the device before forgetting it"
+        );
+        let mut next = inner.records.clone();
+        ensure!(next.devices.remove(id).is_some(), "device not found");
+        storage::replace_json(&self.path, &next)?;
+        inner.records = next;
+        Ok(())
+    }
+    pub fn telemetry(&self, id: &str, kind: &str, data: serde_json::Value) -> Result<()> {
+        ensure!(
+            serde_json::to_vec(&data)?.len() <= 96 * 1024,
+            "telemetry exceeds size limit"
+        );
+        let mut inner = self.lock();
+        let mut next = inner.records.clone();
+        let Some(device) = next.devices.get_mut(id) else {
+            return Ok(());
+        };
+        if !device.details.is_object() {
+            device.details = serde_json::json!({});
+        }
+        device.details[kind] = data;
+        if kind == "coreinfo" {
+            device.core_ready = true;
+        }
+        storage::replace_json(&self.path, &next)?;
+        inner.records = next;
+        Ok(())
     }
 }
 
@@ -136,6 +230,7 @@ impl Drop for Presence {
         inner.sessions.remove(&self.node);
         if let Some(device) = inner.records.devices.get_mut(&self.node) {
             device.status = DeviceStatus::Offline;
+            device.core_ready = false;
             device.last_seen = Some(now());
         }
         if let Err(error) = storage::replace_json(&self.registry.path, &inner.records) {

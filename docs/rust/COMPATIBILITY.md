@@ -3,7 +3,8 @@
 Target: replace the server and browser interface while initially retaining the
 existing MeshCentral agents. Protocol compatibility is a goal; the current starter
 accepts explicitly allowlisted lab agents using raw RSA certificate proofs.
-Remote sessions and production migration are not implemented.
+Operator accounts, scoped authorization, agent cores, terminal, files and desktop
+viewing now pass local acceptance. Production migration remains unimplemented.
 
 ## Evidence baseline
 
@@ -44,8 +45,36 @@ compatibility, especially large certificates, PKCS#7 proofs, and legacy variants
 One bounded unauthenticated `agentName` JSON message is accepted and ignored for
 identity/admission. Commands 30/31 are also advisory, never authentication evidence.
 Admission further caps computer names at 255 bytes and rejects control characters.
-The live handler limits messages to 16 KiB, allows at most 12 authentication
+The live handler limits authentication messages to 16 KiB, allows at most 12 authentication
 messages within 15 seconds, and bounds active sockets/handshakes at 32/8.
+After authentication, the transport allows up to 1 MiB per message; accepted
+telemetry is capped at 96 KiB. Core bundles are capped at 2 MiB and relay messages
+at 1 MiB. Browser desktop jumbo-frame assembly is bounded at 4 MiB.
+
+## Core and remote protocol support
+
+Native commands 11/10/16 query, transfer and activate the retained upstream
+JavaScript core, with SHA-384 hash comparison. The Rust server packages no agent
+binary update and does not change the executable. Authenticated JSON telemetry
+is associated only with the certificate-derived node; it cannot nominate a
+different inventory identity.
+
+The operator API creates a short-lived, single-use native relay ticket and sends
+it through the authenticated parent-agent connection. The native relay connects
+to `/meshrelay.ashx` on the TLS listener; the browser attaches using its own
+session cookie and a non-secret session identifier. Browser ownership binds to
+that exact sign-in, not just the username. Logout, account changes and parent
+agent disconnect close remote sessions. Both relay sides have a 30-second attach
+window; active sessions have a one-hour ceiling. The server fixes each session's
+usage: terminal 1, desktop 2, files 5.
+
+The React console uses xterm for terminal output, the upstream desktop renderer
+for binary desktop/image packets, and acknowledged file-transfer messages.
+Uploads/downloads are bounded at 100 MiB in the current UI. Native agent local
+permissions and consent still apply; the preview does not bypass OS consent.
+Desktop viewing passed on macOS; desktop input and Windows/Linux need separate
+acceptance. Consult [FEATURES.md](FEATURES.md) before treating retained upstream
+features as implemented by Rust.
 
 ## Delivery sequence
 
@@ -56,10 +85,9 @@ messages within 15 seconds, and bounds active sockets/handshakes at 32/8.
    possession, exact node/mesh policy, and a real stock macOS agent connection.
 3. **Real presence — delivered locally:** persistent records, offline-on-load,
    disconnect cleanup, duplicate-session rejection, and automatic reconnect.
-   Operator authentication and authorization remain required before network exposure.
-4. **Remote operations:** implement authorized, session-bound relays and prove
-   terminal, file transfer, and desktop separately with existing browser-side
-   protocol code as a reference. Audit session lifecycle and cleanup.
+4. **Core management — delivered locally:** operator authentication/RBAC, group
+   management, device metadata, retained agent cores, terminal, file transfer,
+   desktop rendering, lifecycle audit, session ownership and cleanup.
 5. **Migration and release:** cover supported OS/agent versions, restore/recovery,
    trust-preserving migration, resource limits, and unattended reconnect behavior.
 

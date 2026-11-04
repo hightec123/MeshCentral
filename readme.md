@@ -2,8 +2,9 @@
 
 > **Rust rewrite development branch:** the new Rust server and React/Vite console
 > live alongside the original implementation. Start with [the Rust rewrite guide](docs/rust/README.md).
-> This is a local lab preview with certificate authentication for explicitly approved agents.
-> Remote desktop, terminal, and file-transfer sessions are not implemented yet.
+> This local preview includes operator accounts, group permissions, agent certificate
+> authentication, terminal, file transfer, and desktop viewing tested with a stock macOS agent.
+> Full upstream parity remains in progress; see [the feature ledger](docs/rust/FEATURES.md).
 > The original MeshCentral source, agents, and Apache-2.0 license are retained below.
 
 ## Table of Contents

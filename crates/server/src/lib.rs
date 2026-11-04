@@ -2,8 +2,13 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 
 pub mod agent;
 pub mod auth;
+pub mod console;
+pub mod core;
 pub mod identity;
+pub mod management;
+pub mod operators;
 pub mod registry;
+pub mod remote;
 pub mod storage;
 
 use axum::{
@@ -53,8 +58,8 @@ impl Config {
     }
 }
 
-/// The first slice has no user authentication. Do not expose its HTTP interface
-/// on a network until that boundary is implemented; there is no override switch.
+/// Keep the preview local until HTTPS, deployment and multi-platform acceptance
+/// are implemented and checked; there is deliberately no override switch.
 pub fn validate_listen(address: SocketAddr) -> Result<(), String> {
     if address.ip().is_loopback() {
         Ok(())
@@ -64,9 +69,10 @@ pub fn validate_listen(address: SocketAddr) -> Result<(), String> {
 }
 
 #[derive(Clone)]
-struct AppState {
+pub struct AppState {
     started: Instant,
     runtime: Option<Arc<agent::AgentRuntime>>,
+    operators: Option<Arc<operators::Operators>>,
 }
 
 #[derive(Serialize)]
@@ -101,6 +107,22 @@ pub struct Device {
     pub platform: String,
     pub status: DeviceStatus,
     pub last_seen: Option<String>,
+    #[serde(default)]
+    pub group_id: String,
+    #[serde(default)]
+    pub node_id_hex: String,
+    #[serde(default)]
+    pub hostname: String,
+    #[serde(default)]
+    pub alias: Option<String>,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub details: serde_json::Value,
+    #[serde(default)]
+    pub core_ready: bool,
 }
 
 #[derive(Serialize)]
@@ -119,9 +141,32 @@ pub fn app(web_dir: PathBuf) -> Router {
 }
 
 pub fn app_with_runtime(web_dir: PathBuf, runtime: Option<Arc<agent::AgentRuntime>>) -> Router {
+    app_with_services(web_dir, runtime, None)
+}
+
+pub fn app_with_services(
+    web_dir: PathBuf,
+    runtime: Option<Arc<agent::AgentRuntime>>,
+    operators: Option<Arc<operators::Operators>>,
+) -> Router {
+    let state = AppState {
+        started: Instant::now(),
+        runtime,
+        operators,
+    };
+    let protected = Router::new()
+        .route("/v1/devices", get(inventory))
+        .merge(management::routes())
+        .merge(remote::routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            console::require_operator,
+        ));
     let api = Router::new()
         .route("/v1/server", get(server_info))
-        .route("/v1/devices", get(inventory))
+        .merge(console::public_routes())
+        .merge(console::protected_routes(state.clone()))
+        .merge(protected)
         .fallback(api_not_found);
 
     Router::new()
@@ -141,15 +186,13 @@ pub fn app_with_runtime(web_dir: PathBuf, runtime: Option<Arc<agent::AgentRuntim
         .layer(SetResponseHeaderLayer::overriding(
             header::CONTENT_SECURITY_POLICY,
             HeaderValue::from_static(
-                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
             ),
         ))
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn(local_host_only))
-        .with_state(AppState {
-            started: Instant::now(),
-            runtime,
-        })
+        .layer(axum::extract::DefaultBodyLimit::max(64*1024))
+        .with_state(state)
 }
 
 async fn local_host_only(request: Request, next: Next) -> axum::response::Response {
@@ -189,19 +232,38 @@ async fn server_info(State(state): State<AppState>) -> Json<ServerInfo> {
         uptime_seconds: state.started.elapsed().as_secs(),
         capabilities: Capabilities {
             agent_enrollment: state.runtime.is_some(),
-            remote_desktop: false,
-            terminal: false,
-            file_transfer: false,
+            remote_desktop: state.runtime.as_ref().is_some_and(|r| r.cores.available()),
+            terminal: state.runtime.as_ref().is_some_and(|r| r.cores.available()),
+            file_transfer: state.runtime.as_ref().is_some_and(|r| r.cores.available()),
         },
     })
 }
 
-async fn inventory(State(state): State<AppState>) -> Json<Inventory> {
+async fn inventory(
+    State(state): State<AppState>,
+    axum::Extension(principal): axum::Extension<operators::Principal>,
+) -> Json<Inventory> {
     Json(Inventory {
         devices: state
             .runtime
-            .map(|runtime| runtime.registry.snapshot())
-            .unwrap_or_default(),
+            .map(|runtime| {
+                let policy = runtime.policy.read().unwrap_or_else(|e| e.into_inner());
+                runtime
+                    .registry
+                    .snapshot()
+                    .into_iter()
+                    .map(|mut device| {
+                        if let Some(group) = policy.group(&device.group_id) {
+                            device.group = group.group_name;
+                        }
+                        device
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|d| principal.user.can_view(&d.group_id))
+            .collect(),
     })
 }
 

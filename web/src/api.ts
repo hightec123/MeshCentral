@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from "zod";
 
 export const serverSchema = z.object({
   name: z.string(),
@@ -18,8 +18,16 @@ const deviceSchema = z.object({
   name: z.string(),
   group: z.string(),
   platform: z.string(),
-  status: z.enum(['online', 'offline']),
+  status: z.enum(["online", "offline"]),
   last_seen: z.iso.datetime().nullable(),
+  group_id: z.string().default(""),
+  node_id_hex: z.string().default(""),
+  hostname: z.string().default(""),
+  alias: z.string().nullable().default(null),
+  notes: z.string().default(""),
+  tags: z.array(z.string()).default([]),
+  core_ready: z.boolean().default(false),
+  details: z.record(z.string(), z.unknown()).nullable().default({}),
 });
 
 const inventorySchema = z.object({ devices: z.array(deviceSchema) });
@@ -37,27 +45,35 @@ export class ConsoleApiError extends Error {}
 async function readJson(path: string, signal: AbortSignal): Promise<unknown> {
   const response = await fetch(path, {
     signal,
-    credentials: 'same-origin',
-    headers: { Accept: 'application/json' },
-    cache: 'no-store',
+    credentials: "same-origin",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
   });
-  if (!response.ok) throw new ConsoleApiError(`The server returned ${response.status}. Retry the connection.`);
+  if (response.status === 401) window.dispatchEvent(new Event("mcr-signout"));
+  if (!response.ok)
+    throw new ConsoleApiError(
+      `The server returned ${response.status}. Retry the connection.`,
+    );
   try {
     return await response.json();
   } catch {
-    throw new ConsoleApiError('The server sent an unreadable response. Retry the connection.');
+    throw new ConsoleApiError(
+      "The server sent an unreadable response. Retry the connection.",
+    );
   }
 }
 
 export async function fetchSnapshot(signal: AbortSignal): Promise<Snapshot> {
   const [server, inventory] = await Promise.all([
-    readJson('/api/v1/server', signal),
-    readJson('/api/v1/devices', signal),
+    readJson("/api/v1/server", signal),
+    readJson("/api/v1/devices", signal),
   ]);
   const parsedServer = serverSchema.safeParse(server);
   const parsedInventory = inventorySchema.safeParse(inventory);
   if (!parsedServer.success || !parsedInventory.success) {
-    throw new ConsoleApiError('The server sent unexpected device information. Retry the connection.');
+    throw new ConsoleApiError(
+      "The server sent unexpected device information. Retry the connection.",
+    );
   }
   return {
     server: parsedServer.data,

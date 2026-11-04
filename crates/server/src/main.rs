@@ -3,7 +3,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use meshcentral_server::{
     Config,
     agent::AgentRuntime,
-    app_with_runtime,
+    app_with_services,
     auth::AdmissionPolicy,
     identity::{Identity, decode_hex, hex},
     storage,
@@ -20,9 +20,19 @@ async fn main() -> Result<()> {
     let config = Config::from_env().map_err(anyhow::Error::msg)?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     if !args.is_empty() {
+        if args.len() == 2 && args[0] == "init-user" {
+            use std::io::Read;
+            let _lock = storage::lock_directory(&config.data_dir)?;
+            let mut password = String::new();
+            std::io::stdin().take(130).read_to_string(&mut password)?;
+            meshcentral_server::operators::Operators::open(&config.data_dir)?
+                .bootstrap(&args[1], password.trim_end_matches(['\r', '\n']))?;
+            println!("Administrator created. Sign in through the local console.");
+            return Ok(());
+        }
         ensure!(
             args.len() == 3 && args[0] == "init-lab",
-            "usage: meshcentral-server [init-lab NODE_ID_HEX AGENT_MSH_PATH]"
+            "usage: meshcentral-server [init-user USERNAME | init-lab NODE_ID_HEX AGENT_MSH_PATH]"
         );
         initialize_lab(&config, &args[1], Path::new(&args[2]))?;
         println!(
@@ -41,6 +51,19 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+    let _console_lock = if !initialized {
+        Some(storage::lock_directory(&config.data_dir)?)
+    } else {
+        None
+    };
+    let operators = meshcentral_server::operators::Operators::open(&config.data_dir)?;
+    if let Some(runtime) = &runtime {
+        *runtime
+            .agent_address
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = config.agent_listen;
+        *runtime.audit.write().unwrap_or_else(|e| e.into_inner()) = Some(operators.audit.clone());
+    }
     let listener = TcpListener::bind(config.listen).await?;
     tracing::info!(address = %listener.local_addr()?, enrollment = runtime.is_some(), "MeshCentral Rust local lab console");
     if !config.web_dir.join("index.html").is_file() {
@@ -73,11 +96,14 @@ async fn main() -> Result<()> {
 
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let mut http_task = tokio::spawn(async move {
-        axum::serve(listener, app_with_runtime(config.web_dir, runtime))
-            .with_graceful_shutdown(async {
-                let _ = stop_rx.await;
-            })
-            .await
+        axum::serve(
+            listener,
+            app_with_services(config.web_dir, runtime, Some(operators)),
+        )
+        .with_graceful_shutdown(async {
+            let _ = stop_rx.await;
+        })
+        .await
     });
 
     if let Some(mut native) = tls_task {

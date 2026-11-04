@@ -1,6 +1,51 @@
 # Validation evidence
 
-## Certificate authentication and real-agent milestone
+## Core-management milestone — version 0.2.0
+
+Date: 4 November 2026 (Pacific/Auckland). This section describes the current
+preview; earlier milestone sections below are historical.
+
+| Check | Result |
+| --- | --- |
+| Rust tests | 48 passed: 13 protocol, 5 relay, 15 authentication/persistence/CLI/TLS, 7 HTTP, 8 operator/management |
+| Formatting and Clippy (`-D warnings`) | Passed |
+| TypeScript and Vite production build | Passed |
+| Desktop/mobile browser regressions | 18 passed |
+| Real stock-agent reconnect after server restart | Online with the same certificate-derived NodeID and management core ready |
+| Terminal | Browser xterm displayed actual output from a harmless split-string printf marker |
+| File transfer | Browser uploaded and downloaded 40,000 deterministic bytes, compared exact bytes, and deleted its fixture |
+| Desktop viewing | Browser decoded and drew actual native-agent desktop images; no desktop input events sent |
+| Management and cleanup | Metadata edited and restored, audit visible, all test remote sessions closed, no browser errors |
+| Mobile layout | Authenticated real inventory visible without page overflow |
+
+The live checks used only the existing disposable macOS ARM64 agent described
+below. The native executable remains unchanged. The retained upstream JavaScript
+core was packaged and uploaded over the authenticated agent connection, as normal
+MeshCentral management requires. The browser uses the upstream desktop renderer;
+the server and new REST/relay implementation run in Rust without a Node server.
+
+Additional regressions cover viewer/foreign-group mutation denial, group lifecycle
+and configuration permissions, refusing deletion of groups with user grants,
+refusing deletion of online devices, last-administrator protection, password
+hashing and password-change revocation, stale principals after logout, CSRF and
+cross-origin denial, and revocation while an agent handshake is in flight. Relay
+tests check single-use tickets/attachment, exact sign-in ownership, role/group
+denial, logout, attachment expiry, and disconnect cleanup.
+
+Reproduce ordinary checks using [README.md](README.md). The separate explicit live
+helper is `node scripts/verify-live-lab.cjs`; private result/evidence files remain
+under ignored `.local/evidence/`, including `management-ui-acceptance.json`,
+desktop/mobile inventory screenshots, and protocol-level file/desktop checks.
+Screenshots do not publish the host's actual desktop contents. Private credentials
+remain in `.local/operator-login.json`, not in this repository.
+
+This is local acceptance of a core-management slice, not a production readiness
+or full-parity claim. Windows/Linux, real desktop input, legacy PKCS#7 and the
+remaining integrations in [FEATURES.md](FEATURES.md) are not accepted. No production
+device, service, database, host trust store or agent binary was changed. No GitHub
+Actions workflow was dispatched.
+
+## Certificate authentication and real-agent milestone (historical)
 
 Date: 4 November 2026 (Pacific/Auckland). This section supersedes the starter's
 earlier limitations below for certificate authentication and local agent presence.
@@ -46,7 +91,8 @@ locking, idempotent lab initialization, and refusal to recreate missing trust.
 Legacy PKCS#7 wrappers are explicitly rejected and not claimed as compatible.
 
 No production agent/service, certificate store, or database was accessed or changed.
-No remote desktop, terminal, file transfer, agent update, or core upload was sent.
+At that earlier milestone, no remote desktop, terminal, file transfer, agent
+update, or core upload was sent. The core-management section above supersedes it.
 The connected process is disposable and is not installed as a system service.
 
 ## Initial starter validation (historical)
@@ -79,7 +125,7 @@ profile and global Rust installation were not modified. Rust/Node dependencies,
 build products, browser binaries, screenshots, and test traces are excluded from
 version control; the Rust and npm lockfiles are included.
 
-## Limits of this evidence
+## Limits of the initial starter evidence (historical)
 
 No native MeshAgent was connected, installed, repointed, or modified. Wire fixtures
 are synthetic. Certificate proof verification, user authentication, persistence,

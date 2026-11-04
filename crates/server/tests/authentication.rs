@@ -229,6 +229,51 @@ fn duplicate_commands_are_rejected() {
 }
 
 #[test]
+fn additional_groups_enforce_their_own_node_allowlists() {
+    let mut policy = (*FIXTURE.policy).clone();
+    let second = "D4".repeat(48);
+    let mut secondary = policy.clone();
+    secondary.mesh_id_hex = second.clone();
+    policy
+        .additional_groups
+        .push(meshcentral_server::auth::AgentGroup {
+            mesh_id_hex: second.clone(),
+            group_name: "Second group".into(),
+            allowed_node_ids_hex: policy.allowed_node_ids_hex.clone(),
+        });
+    policy.validate().unwrap();
+    let mut state = handshake(Arc::new(policy.clone()));
+    let replies = state
+        .receive(&challenge(&FIXTURE.server.web_hash, &[4; 48]))
+        .unwrap();
+    state.receive(&metadata(&secondary)).unwrap();
+    state
+        .receive(&proof(
+            &FIXTURE.server.web_hash,
+            &replies[0][50..],
+            &[4; 48],
+        ))
+        .unwrap();
+    let peer = state.finish().unwrap().unwrap();
+    assert_eq!(peer.group, "Second group");
+    assert_eq!(peer.mesh_id_hex, second);
+    policy.additional_groups[0].allowed_node_ids_hex.clear();
+    let mut state = handshake(Arc::new(policy));
+    let replies = state
+        .receive(&challenge(&FIXTURE.server.web_hash, &[4; 48]))
+        .unwrap();
+    state.receive(&metadata(&secondary)).unwrap();
+    state
+        .receive(&proof(
+            &FIXTURE.server.web_hash,
+            &replies[0][50..],
+            &[4; 48],
+        ))
+        .unwrap();
+    assert!(state.finish().is_err());
+}
+
+#[test]
 fn persistent_identity_has_stable_keys_and_private_permissions() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("identity.json");
@@ -467,6 +512,41 @@ async fn tls_websocket_admits_verified_peer_and_cleans_up_disconnect() {
         .unwrap();
     assert!(matches!(
         invalid.next().await,
+        Some(Ok(Message::Close(_))) | None
+    ));
+    assert_eq!(runtime.registry.snapshot()[0].status, DeviceStatus::Offline);
+
+    // Removing an allowlisted identity while a previously valid handshake is in
+    // flight must prevent admission when its final proof arrives.
+    let (mut revoked, _) =
+        connect_async_tls_with_config(url.clone(), None, false, Some(connector.clone()))
+            .await
+            .unwrap();
+    revoked
+        .send(Message::Binary(
+            challenge(&FIXTURE.server.web_hash, &[9; 48]).into(),
+        ))
+        .await
+        .unwrap();
+    let Message::Binary(reply) = revoked.next().await.unwrap().unwrap() else {
+        panic!("missing challenge");
+    };
+    let Message::Binary(_) = revoked.next().await.unwrap().unwrap() else {
+        panic!("missing proof");
+    };
+    runtime.policy.write().unwrap().allowed_node_ids_hex.clear();
+    revoked
+        .send(Message::Binary(metadata(&FIXTURE.policy).into()))
+        .await
+        .unwrap();
+    revoked
+        .send(Message::Binary(
+            proof(&FIXTURE.server.web_hash, &reply[50..], &[9; 48]).into(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        revoked.next().await,
         Some(Ok(Message::Close(_))) | None
     ));
     assert_eq!(runtime.registry.snapshot()[0].status, DeviceStatus::Offline);
