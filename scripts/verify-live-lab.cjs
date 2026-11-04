@@ -6,18 +6,36 @@ const { chromium, devices } = require("../web/node_modules/playwright");
 const { expect } = require("../web/node_modules/@playwright/test");
 async function main() {
   const root = path.join(__dirname, "..");
+  const linux = process.argv.slice(2).join(" ") === "--linux";
+  if (process.argv.length > 2 && !linux)
+    throw new Error("Only --linux is supported.");
+  const linuxIdentity = linux
+    ? JSON.parse(
+        fs.readFileSync(path.join(root, ".local/linux-agent/identity.json")),
+      )
+    : null;
+  const prefix = linux ? "linux-" : "";
   const credentials = JSON.parse(
-    fs.readFileSync(path.join(root, ".local/operator-login.json")),
-  );
-  const expected = JSON.parse(
     fs.readFileSync(
-      path.join(root, ".local/evidence/online-before-restart.json"),
+      path.join(root, ".local/" + prefix + "operator-login.json"),
     ),
-  ).device.id;
-  if (credentials.url !== "http://127.0.0.1:3000")
+  );
+  const expected =
+    linuxIdentity?.node_id ??
+    JSON.parse(
+      fs.readFileSync(
+        path.join(root, ".local/evidence/online-before-restart.json"),
+      ),
+    ).device.id;
+  if (
+    credentials.url !==
+    (linux ? "http://127.0.0.1:3001" : "http://127.0.0.1:3000")
+  )
     throw new Error("This acceptance script only targets the local lab URL.");
-  const scratch = path.join(root, ".local/lab-agent/acceptance");
-  fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
+  const scratch = linux
+    ? "/home/vincent.linux/meshcentral-lab/acceptance"
+    : path.join(root, ".local/lab-agent/acceptance");
+  if (!linux) fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
   const browser = await chromium.launch();
   const context = await browser.newContext({
     viewport: { width: 1440, height: 1000 },
@@ -121,13 +139,11 @@ async function main() {
     const payload = Buffer.from(
       Array.from({ length: 40000 }, (_, i) => (i * 29 + 123) & 255),
     );
-    await workspace
-      .locator("input[type=file]")
-      .setInputFiles({
-        name: filename,
-        mimeType: "application/octet-stream",
-        buffer: payload,
-      });
+    await workspace.locator("input[type=file]").setInputFiles({
+      name: filename,
+      mimeType: "application/octet-stream",
+      buffer: payload,
+    });
     const row = workspace
       .getByRole("row")
       .filter({ has: page.getByRole("cell", { name: filename, exact: true }) });
@@ -159,10 +175,118 @@ async function main() {
       )
       .toBeGreaterThan(0);
     result.desktop_images_drawn = true;
-    // No keyboard/mouse events are sent to the real desktop during acceptance.
+    // Input is permitted only on the disposable Linux VM's virtual desktop.
+    // The host's real macOS desktop is always viewed without input.
+    const inputName = "desktop-input-" + Date.now() + ".txt";
+    if (linux) {
+      const launch = require("node:child_process").spawnSync(
+        "limactl",
+        [
+          "shell",
+          "mcr-linux",
+          "--",
+          "sh",
+          "-c",
+          "DISPLAY=:99 XAUTHORITY=/home/vincent.linux/meshcentral-lab/empty.xauth nohup xterm -title MCR-Input-Receiver -geometry 100x30+0+0 -e python3 /home/vincent.linux/meshcentral-lab/desktop-input-receiver.py " +
+            inputName +
+            " >/home/vincent.linux/meshcentral-lab/input-receiver.log 2>&1 </dev/null &",
+        ],
+        {
+          env: { ...process.env, LIMA_HOME: "/private/tmp/mcr-lima" },
+          encoding: "utf8",
+        },
+      );
+      if (launch.status !== 0)
+        throw new Error("Could not launch the isolated input receiver.");
+      await expect
+        .poll(
+          () =>
+            require("node:child_process").spawnSync(
+              "limactl",
+              [
+                "shell",
+                "mcr-linux",
+                "--",
+                "sh",
+                "-c",
+                "DISPLAY=:99 xwininfo -root -tree | grep MCR-Input-Receiver",
+              ],
+              {
+                env: { ...process.env, LIMA_HOME: "/private/tmp/mcr-lima" },
+                stdio: "ignore",
+              },
+            ).status,
+        )
+        .toBe(0);
+      await workspace
+        .getByRole("checkbox", { name: "Allow mouse and keyboard control" })
+        .check();
+      await workspace
+        .getByLabel("Remote desktop", { exact: true })
+        .click({ position: { x: 100, y: 100 } });
+      await page.keyboard.type("MCR_DESKTOP_INPUT_VERIFIED", { delay: 100 });
+      await page.keyboard.press("Enter");
+      // Keep the desktop relay open until the guest has handled the last input
+      // packet. Closing it immediately can cancel buffered keystrokes.
+      await expect
+        .poll(
+          () =>
+            require("node:child_process").spawnSync(
+              "limactl",
+              [
+                "shell",
+                "mcr-linux",
+                "--",
+                "test",
+                "-f",
+                scratch + "/" + inputName,
+              ],
+              {
+                env: { ...process.env, LIMA_HOME: "/private/tmp/mcr-lima" },
+                stdio: "ignore",
+              },
+            ).status,
+          { timeout: 15000 },
+        )
+        .toBe(0);
+    }
     await workspace
       .getByRole("button", { name: "Disconnect", exact: true })
       .click();
+    if (linux) {
+      await workspace.getByRole("tab", { name: "Files", exact: true }).click();
+      await workspace
+        .getByRole("button", { name: "Connect", exact: true })
+        .click();
+      await expect(
+        workspace.getByText("Connected", { exact: true }),
+      ).toBeVisible();
+      await workspace.getByLabel("Remote path", { exact: true }).fill(scratch);
+      await workspace
+        .getByRole("button", { name: "Open", exact: true })
+        .click();
+      const proof = workspace
+        .getByRole("row")
+        .filter({
+          has: page.getByRole("cell", { name: inputName, exact: true }),
+        });
+      await expect(proof).toBeVisible({ timeout: 15000 });
+      const pending = page.waitForEvent("download");
+      await proof
+        .getByRole("button", { name: "Download", exact: true })
+        .click();
+      const download = await pending;
+      expect(fs.readFileSync(await download.path(), "utf8")).toBe(
+        "MCR_DESKTOP_INPUT_VERIFIED\n",
+      );
+      page.once("dialog", (dialog) => dialog.accept());
+      await proof.getByRole("button", { name: "Delete", exact: true }).click();
+      await expect(proof).not.toBeVisible();
+      await workspace
+        .getByRole("button", { name: "Disconnect", exact: true })
+        .click();
+      result.desktop_mouse_keyboard_input = true;
+    }
     await workspace
       .getByRole("button", { name: "Close device", exact: true })
       .click();
@@ -178,7 +302,10 @@ async function main() {
     result.audit_ui = true;
     await page.getByRole("button", { name: "Devices", exact: true }).click();
     await page.screenshot({
-      path: path.join(root, ".local/evidence/management-console-desktop.png"),
+      path: path.join(
+        root,
+        ".local/evidence/" + prefix + "management-console-desktop.png",
+      ),
       fullPage: true,
     });
     const mobileContext = await browser.newContext({
@@ -196,14 +323,20 @@ async function main() {
       ),
     ).toBe(true);
     await mobile.screenshot({
-      path: path.join(root, ".local/evidence/management-console-mobile.png"),
+      path: path.join(
+        root,
+        ".local/evidence/" + prefix + "management-console-mobile.png",
+      ),
       fullPage: true,
     });
     await mobileContext.close();
     result.mobile_layout = true;
     expect(errors).toEqual([]);
     fs.writeFileSync(
-      path.join(root, ".local/evidence/management-ui-acceptance.json"),
+      path.join(
+        root,
+        ".local/evidence/" + prefix + "management-ui-acceptance.json",
+      ),
       JSON.stringify(
         { recorded_at: new Date().toISOString(), ...result },
         null,

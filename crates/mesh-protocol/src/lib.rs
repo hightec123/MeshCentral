@@ -7,6 +7,9 @@
 
 use std::{error::Error, fmt};
 
+mod pkcs7;
+pub use pkcs7::pkcs7_rsa_signature;
+
 pub const HASH_LENGTH: usize = 48;
 pub const MAX_HANDSHAKE_FRAME: usize = 16 * 1024;
 pub const MAX_COMPUTER_NAME: usize = 1024;

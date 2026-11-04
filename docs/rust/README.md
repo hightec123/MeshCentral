@@ -19,8 +19,13 @@ Implemented:
   proofs, fresh nonces, exact node/mesh allowlisting, and real online/offline presence.
 - Existing-agent core distribution, system telemetry, authorized terminal, file
   management/transfer, and desktop viewing with optional input controls. Live
-  acceptance covers the unmodified stock macOS ARM64 agent; desktop input itself
-  has not been exercised against the host's actual desktop.
+  acceptance covers unmodified stock macOS ARM64 and Linux ARM64 agents. Desktop
+  input passed in a disposable Linux X11 input sink; the host's actual macOS
+  desktop is viewed without input during acceptance.
+- Bounded legacy Windows CryptoAPI PKCS#7 signature framing with pinned-key/fresh
+  transcript verification. Windows live acceptance remains pending a lab VM.
+- Encrypted offline backup/restore preserving trust, accounts and device metadata.
+  See [RECOVERY.md](RECOVERY.md) for CLI commands, format and recovery limits.
 
 The first live-agent milestone passed with an unmodified official macOS ARM64
 MeshAgent: authenticated connection, visible online in the console, offline on
@@ -115,6 +120,9 @@ and the recorded expected NodeID. It executes a harmless terminal marker, writes
 and deletes its own scratch file, views desktop images without sending input,
 restores device metadata, and checks audit, cleanup, and mobile layout. It is not
 run by the ordinary browser suite and must never be aimed at production.
+Use `--linux` only after preparing the separate disposable Linux VM/server in
+[LINUX-LAB.md](LINUX-LAB.md). That mode additionally records actual mouse/keyboard
+input in a dedicated virtual Xterm input sink which never executes the text.
 
 Regenerate protocol fixtures after an intentional upstream reference update:
 

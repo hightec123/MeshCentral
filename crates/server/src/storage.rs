@@ -34,14 +34,18 @@ pub fn private_directory(path: &Path) -> Result<()> {
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    serde_json::from_slice(&read_private(path, 1024 * 1024)?).context("invalid state file")
+}
+
+pub fn read_private(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path).context("reading state file metadata")?;
     ensure!(
         metadata.is_file() && !metadata.file_type().is_symlink(),
         "state file must be a regular file"
     );
     ensure!(
-        metadata.len() <= 1024 * 1024,
-        "state file exceeds the lab size limit"
+        metadata.len() <= max_bytes,
+        "private file exceeds the size limit"
     );
     #[cfg(unix)]
     {
@@ -51,7 +55,17 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
             "state file must have mode 0600"
         );
     }
-    serde_json::from_slice(&fs::read(path)?).context("invalid state file")
+    // Bound the actual read as well as metadata in case the file grows.
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= max_bytes,
+        "private file exceeds the size limit"
+    );
+    Ok(bytes)
 }
 
 pub fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {

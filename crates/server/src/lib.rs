@@ -2,6 +2,7 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 
 pub mod agent;
 pub mod auth;
+pub mod backup;
 pub mod console;
 pub mod core;
 pub mod identity;

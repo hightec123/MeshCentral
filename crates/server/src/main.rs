@@ -20,6 +20,30 @@ async fn main() -> Result<()> {
     let config = Config::from_env().map_err(anyhow::Error::msg)?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     if !args.is_empty() {
+        if (args.len() == 2 && args[0] == "backup") || (args.len() == 3 && args[0] == "restore") {
+            use std::io::Read;
+            let mut password = String::new();
+            std::io::stdin().take(130).read_to_string(&mut password)?;
+            let password = password.trim_end_matches(['\r', '\n']);
+            if args[0] == "backup" {
+                meshcentral_server::backup::create(
+                    &config.data_dir,
+                    Path::new(&args[1]),
+                    password,
+                )?;
+                println!("Encrypted offline backup created.");
+            } else {
+                meshcentral_server::backup::restore(
+                    Path::new(&args[1]),
+                    Path::new(&args[2]),
+                    password,
+                )?;
+                println!(
+                    "Backup restored into a new private state directory. All devices start offline; sign in again."
+                );
+            }
+            return Ok(());
+        }
         if args.len() == 2 && args[0] == "init-user" {
             use std::io::Read;
             let _lock = storage::lock_directory(&config.data_dir)?;
@@ -32,7 +56,7 @@ async fn main() -> Result<()> {
         }
         ensure!(
             args.len() == 3 && args[0] == "init-lab",
-            "usage: meshcentral-server [init-user USERNAME | init-lab NODE_ID_HEX AGENT_MSH_PATH]"
+            "usage: meshcentral-server [init-user USERNAME | init-lab NODE_ID_HEX AGENT_MSH_PATH | backup ARCHIVE | restore ARCHIVE NEW_DATA_DIR]"
         );
         initialize_lab(&config, &args[1], Path::new(&args[2]))?;
         println!(

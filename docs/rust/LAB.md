@@ -101,9 +101,10 @@ agent databases, mesh configuration, downloaded executable, or screenshots are
 published with the source.
 
 This milestone supports raw RSA/SHA-384 proofs with 2048–4096-bit agent keys and
-both supported TLS-hash forms. Legacy PKCS#7 proof envelopes are rejected. The
-specific live acceptance is macOS ARM64; Windows/Linux interoperability remains
-to be tested. Operator accounts/RBAC and remote sessions now work in the lab;
+both supported TLS-hash forms. Version 0.3.0 also implements the bounded legacy
+Windows CryptoAPI PKCS#7 format with negative cryptographic tests. Live acceptance
+covers macOS ARM64 and the separate [Linux ARM64 lab](LINUX-LAB.md); Windows is
+pending a disposable lab VM. Operator accounts/RBAC and remote sessions work in the lab;
 both listeners remain restricted to loopback pending production deployment gates.
 No host trust store or system service
 configuration is changed.

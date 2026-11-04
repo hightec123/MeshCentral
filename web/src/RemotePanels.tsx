@@ -482,8 +482,10 @@ type Desktop = {
   UnGrabMouseInput: () => void;
   onScreenSizeChange: () => void;
   onPreDrawImage: () => void;
-  handleKeyDown?: (event: KeyboardEvent) => void;
-  handleKeyUp?: (event: KeyboardEvent) => void;
+  xxKeyDown: (event: KeyboardEvent) => void;
+  xxKeyUp: (event: KeyboardEvent) => void;
+  xxKeyPress: (event: KeyboardEvent) => void;
+  handleReleaseKeys: () => void;
 };
 declare global {
   interface Window {
@@ -584,7 +586,6 @@ export function DesktopPanel({ node }: { node: string }) {
     view.onPreDrawImage = () => setFrames((n) => n + 1);
     view.stopInput = true;
     view.Start();
-    view.GrabMouseInput();
     desktop.current = view;
     return () => {
       view.Stop();
@@ -592,8 +593,16 @@ export function DesktopPanel({ node }: { node: string }) {
     };
   }, []);
   useEffect(() => {
-    if (desktop.current) desktop.current.stopInput = !control;
-  }, [control]);
+    const view = desktop.current;
+    if (!view) return;
+    const enabled = control && remote.status === "Connected";
+    view.stopInput = !enabled;
+    if (enabled) view.GrabMouseInput();
+    else {
+      view.handleReleaseKeys();
+      view.UnGrabMouseInput();
+    }
+  }, [control, remote.status]);
   return (
     <section>
       <Controls remote={remote} title="Remote desktop" />
@@ -622,12 +631,23 @@ export function DesktopPanel({ node }: { node: string }) {
           height={600}
           tabIndex={0}
           aria-label="Remote desktop"
+          onMouseDownCapture={(e) => {
+            if (control && remote.status === "Connected")
+              e.currentTarget.focus();
+          }}
           onKeyDown={(e) => {
-            if (control) desktop.current?.handleKeyDown?.(e.nativeEvent);
+            if (control && remote.status === "Connected")
+              desktop.current?.xxKeyDown(e.nativeEvent);
           }}
           onKeyUp={(e) => {
-            if (control) desktop.current?.handleKeyUp?.(e.nativeEvent);
+            if (control && remote.status === "Connected")
+              desktop.current?.xxKeyUp(e.nativeEvent);
           }}
+          onKeyPress={(e) => {
+            if (control && remote.status === "Connected")
+              desktop.current?.xxKeyPress(e.nativeEvent);
+          }}
+          onBlur={() => desktop.current?.handleReleaseKeys()}
         />
       </div>
       {remote.status === "Connected" && frames === 0 && (

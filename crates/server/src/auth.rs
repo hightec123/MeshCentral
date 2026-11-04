@@ -270,11 +270,17 @@ impl Handshake {
                     .is_ok_and(|id| memcmp::eq(&id, &fingerprint))),
             "node is not authorized"
         );
-        // Raw RSA signatures are supported for this milestone. PKCS#7 wrappers
-        // are rejected, never treated as a verified raw signature.
+        // Windows CryptoAPI agents wrap the same raw signature in PKCS#7.
+        // Embedded certificates/content confer no trust: verify only under the
+        // allowlisted outer certificate against this fresh handshake transcript.
+        let signature = if signature.len() == rsa.size() as usize {
+            signature.as_slice()
+        } else {
+            meshcentral_protocol::pkcs7_rsa_signature(signature)?
+        };
         ensure!(
             signature.len() == rsa.size() as usize,
-            "unsupported signature envelope"
+            "signature/key size mismatch"
         );
         let mut verifier = Verifier::new(MessageDigest::sha384(), &public_key)?;
         verifier.update(web_hash)?;

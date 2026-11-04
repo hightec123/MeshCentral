@@ -65,6 +65,141 @@ fn handshake(policy: Arc<AdmissionPolicy>) -> Handshake {
     Handshake::new(FIXTURE.server.clone(), policy).unwrap()
 }
 
+// CryptoAPI's single-signer SignedData envelope, with an attached transcript and
+// certificate. The envelope's content/certificate must never replace the fresh
+// transcript or the explicitly pinned outer certificate at the trust boundary.
+fn wrapped_proof(raw: &[u8], transcript: &[u8], embedded_cert: &X509) -> Vec<u8> {
+    fn der(tag: u8, bytes: &[u8]) -> Vec<u8> {
+        let length = if bytes.len() < 128 {
+            vec![bytes.len() as u8]
+        } else if bytes.len() <= 255 {
+            vec![0x81, bytes.len() as u8]
+        } else {
+            vec![0x82, (bytes.len() >> 8) as u8, bytes.len() as u8]
+        };
+        [vec![tag], length, bytes.to_vec()].concat()
+    }
+    let cert_length = u16::from_be_bytes([raw[2], raw[3]]) as usize;
+    let signature = &raw[4 + cert_length..];
+    let sha384 = der(
+        0x30,
+        &[
+            der(6, &[0x60, 0x86, 0x48, 1, 0x65, 3, 4, 2, 2]),
+            der(5, &[]),
+        ]
+        .concat(),
+    );
+    let rsa = der(
+        0x30,
+        &[
+            der(6, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 1, 1]),
+            der(5, &[]),
+        ]
+        .concat(),
+    );
+    let mut serial = embedded_cert.serial_number().to_bn().unwrap().to_vec();
+    if serial[0] & 0x80 != 0 {
+        serial.insert(0, 0);
+    }
+    let issuer = der(
+        0x30,
+        &[
+            embedded_cert.issuer_name().to_der().unwrap(),
+            der(2, &serial),
+        ]
+        .concat(),
+    );
+    let signer = der(
+        0x30,
+        &[der(2, &[1]), issuer, sha384.clone(), rsa, der(4, signature)].concat(),
+    );
+    let data = der(
+        0x30,
+        &[
+            der(6, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 7, 1]),
+            der(0xa0, &der(4, transcript)),
+        ]
+        .concat(),
+    );
+    let signed = der(
+        0x30,
+        &[
+            der(2, &[1]),
+            der(0x31, &sha384),
+            data,
+            der(0xa0, &embedded_cert.to_der().unwrap()),
+            der(0x31, &signer),
+        ]
+        .concat(),
+    );
+    let wrapped = der(
+        0x30,
+        &[
+            der(6, &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 1, 7, 2]),
+            der(0xa0, &signed),
+        ]
+        .concat(),
+    );
+    [&raw[..4 + cert_length], &wrapped].concat()
+}
+
+#[test]
+fn legacy_pkcs7_signatures_require_the_pinned_key_and_fresh_transcript() {
+    let nonce = [17; 48];
+    let mut state = handshake(FIXTURE.policy.clone());
+    let replies = state
+        .receive(&challenge(&FIXTURE.server.web_hash, &nonce))
+        .unwrap();
+    let transcript = [
+        FIXTURE.server.web_hash.as_slice(),
+        &replies[0][50..],
+        &nonce,
+    ]
+    .concat();
+    let raw = proof(&FIXTURE.server.web_hash, &replies[0][50..], &nonce);
+    let wrapped = wrapped_proof(&raw, &transcript, &FIXTURE.cert);
+    state.receive(&wrapped).unwrap();
+    state.receive(&metadata(&FIXTURE.policy)).unwrap();
+    assert!(state.finish().unwrap().is_some());
+    let mut replay = handshake(FIXTURE.policy.clone());
+    replay
+        .receive(&challenge(&FIXTURE.server.web_hash, &nonce))
+        .unwrap();
+    replay.receive(&wrapped).unwrap();
+    replay.receive(&metadata(&FIXTURE.policy)).unwrap();
+    assert!(replay.finish().is_err());
+
+    let (foreign_cert, foreign_key) = generate_certificate("Unapproved embedded signer").unwrap();
+    let mut state = handshake(FIXTURE.policy.clone());
+    let replies = state
+        .receive(&challenge(&FIXTURE.server.web_hash, &nonce))
+        .unwrap();
+    let transcript = [
+        FIXTURE.server.web_hash.as_slice(),
+        &replies[0][50..],
+        &nonce,
+    ]
+    .concat();
+    let mut signer = Signer::new(MessageDigest::sha384(), &foreign_key).unwrap();
+    signer.update(&transcript).unwrap();
+    let cert = FIXTURE.cert.to_der().unwrap();
+    let forged = [
+        vec![0, 2],
+        (cert.len() as u16).to_be_bytes().to_vec(),
+        cert,
+        signer.sign_to_vec().unwrap(),
+    ]
+    .concat();
+    state
+        .receive(&wrapped_proof(&forged, &transcript, &foreign_cert))
+        .unwrap();
+    state.receive(&metadata(&FIXTURE.policy)).unwrap();
+    assert!(
+        state.finish().is_err(),
+        "an embedded foreign key must not establish trust"
+    );
+}
+
 #[test]
 fn mutual_rsa_proofs_and_explicit_admission_succeed() {
     let fixture = &*FIXTURE;

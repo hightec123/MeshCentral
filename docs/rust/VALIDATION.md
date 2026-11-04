@@ -1,9 +1,56 @@
 # Validation evidence
 
-## Core-management milestone — version 0.2.0
+## Compatibility and recovery milestone — version 0.3.0
 
 Date: 4 November 2026 (Pacific/Auckland). This section describes the current
-preview; earlier milestone sections below are historical.
+preview; the earlier sections are historical milestones.
+
+| Check | Result |
+| --- | --- |
+| Rust tests | 56 passed: 16 protocol, 7 server relay/encryption, 16 authentication/persistence/CLI/TLS, 2 backup integration, 7 HTTP, 8 operator/management |
+| Formatting, Clippy (`-D warnings`), production frontend build | Passed |
+| Desktop/mobile browser regressions | 20 passed, including view-mode input blocking and opt-in mouse/Unicode/special-key frames |
+| Stock Linux ARM64 agent | Actual mutually authenticated TLS connection, core ready, telemetry and real inventory |
+| Linux terminal and files | Actual shell marker and byte-exact 40,000-byte upload/download, own fixtures removed |
+| Linux desktop | Actual images rendered; mouse/keyboard text captured in a disposable Xterm Python input sink, downloaded byte-exact and deleted |
+| Encrypted recovery drill | Server identity and TLS identity preserved, inventory offline before start, original administrator credentials usable, same unchanged agent reconnected with core ready |
+| Native executable integrity | Official Linux asset digest checked before and after acceptance; no agent binary changes |
+
+Linux ran only inside the isolated Lima/Xvfb lab described in [LINUX-LAB.md](LINUX-LAB.md).
+An explicit X11 environment was required for the old stock agent on a fresh
+headless VM. Its desktop input sink records text without executing it. Ordinary
+browser regression tests use a test-only WebSocket and never connect to an agent.
+The real live helper uses native TLS relays and checks the guest's observed output.
+
+Desktop acceptance exposed and fixed three frontend integration issues: upstream
+keyboard wrappers referenced a page-global `desktop`, Unicode sending needed a
+local `ShortToStr` helper, and mouse handlers were attached in view mode. The
+React adapter now uses instance handlers, scopes keyboard input/focus to its
+canvas, attaches mouse handlers only after explicit control opt-in, and releases
+pressed keys on blur or control disable. The retained upstream renderer is copied
+through a small closure adapter; the upstream source remains unchanged.
+
+Legacy Windows CryptoAPI PKCS#7 framing now has bounded parser tests plus actual
+RSA/SHA-384 wrapped-proof tests. Replay and a foreign embedded signer fail. This
+does not substitute for Windows live acceptance; the user confirmed no disposable
+Windows VM is currently available.
+
+Backup tests cover AES-GCM authentication after wrong passwords or modifications
+to salt/nonce/ciphertext/tag, unsupported headers, disallowed filenames/incomplete
+trust, live-state locking, archive/destination overwrite refusal, original
+identity/account/metadata recovery and session/presence reset. The live drill
+also exercised permission refusal for a non-private parent; recovery succeeded
+inside a private parent. See [RECOVERY.md](RECOVERY.md) for the supported workflow.
+
+Current local evidence includes `linux-management-ui-acceptance.json`,
+`linux-recovery-before-start.json`, `linux-recovery-after-start.json` and desktop/
+mobile inventory screenshots. Archives, passphrases, identities, credentials,
+VM/agent databases and generated bundles remain ignored. No production device,
+host trust store or installed agent service was changed. No GitHub Actions ran.
+
+## Core-management milestone — version 0.2.0 (historical)
+
+Date: 4 November 2026 (Pacific/Auckland). Earlier core-management acceptance.
 
 | Check | Result |
 | --- | --- |

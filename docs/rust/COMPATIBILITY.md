@@ -72,9 +72,25 @@ The React console uses xterm for terminal output, the upstream desktop renderer
 for binary desktop/image packets, and acknowledged file-transfer messages.
 Uploads/downloads are bounded at 100 MiB in the current UI. Native agent local
 permissions and consent still apply; the preview does not bypass OS consent.
-Desktop viewing passed on macOS; desktop input and Windows/Linux need separate
-acceptance. Consult [FEATURES.md](FEATURES.md) before treating retained upstream
+Desktop viewing passed on macOS and Linux; input passed in a disposable Linux
+X11 virtual desktop. Windows still needs live acceptance. Consult [FEATURES.md](FEATURES.md) before treating retained upstream
 features as implemented by Rust.
+
+## Legacy Windows signature envelopes
+
+Version 0.3.0 adds the single-signer, definite-length DER SignedData form emitted
+by native `meshcore/wincrypto.cpp`. The protocol crate extracts framing only;
+the server verifies the resulting RSA/SHA-384 signature under the explicitly
+allowlisted outer certificate over `web_hash || server_nonce || agent_nonce`.
+Embedded certificates, issuer names and attached content never replace that key
+or fresh transcript. Multiple signers, indefinite/non-minimal DER lengths,
+other algorithms, signed attributes and trailing bytes fail closed. Key sizes
+remain restricted to 2048–4096 bits.
+
+Regression tests cover valid wrapped proofs, replay rejection, an unapproved
+embedded signer, raw RSA regressions, and every truncated prefix of an envelope.
+This is a tested implementation of the retained native format, not a claim of
+live Windows acceptance; no disposable Windows VM is currently available.
 
 ## Delivery sequence
 
@@ -91,7 +107,7 @@ features as implemented by Rust.
 5. **Migration and release:** cover supported OS/agent versions, restore/recovery,
    trust-preserving migration, resource limits, and unattended reconnect behavior.
 
-## Completed milestone: one authenticated lab agent
+## Completed milestone: one authenticated lab agent (0.1.0, historical)
 
 The milestone passed on 4 November 2026 with an **unmodified agent binary** connected
 to Rust and visible online in the new console after successful authentication.
