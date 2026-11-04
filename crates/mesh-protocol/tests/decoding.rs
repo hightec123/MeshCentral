@@ -153,3 +153,13 @@ fn unknown_commands_and_oversized_frames_are_rejected() {
         Err(DecodeError::FrameTooLarge)
     );
 }
+
+#[test]
+fn host_information_is_bounded_untrusted_metadata() {
+    assert_eq!(
+        decode_handshake(b"\x00\x1fmacOS - arm64"),
+        Ok(HandshakeFrame::HostInfo("macOS - arm64"))
+    );
+    assert!(decode_handshake(&[vec![0, 31], vec![b'a'; 513]].concat()).is_err());
+    assert!(decode_handshake(&[0, 31, 255]).is_err());
+}

@@ -1,18 +1,28 @@
-use std::{net::SocketAddr, path::PathBuf, time::Instant};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
+
+pub mod agent;
+pub mod auth;
+pub mod identity;
+pub mod registry;
+pub mod storage;
 
 use axum::{
     Json, Router,
+    extract::Request,
     extract::State,
     http::{HeaderValue, StatusCode, header},
+    middleware::{self, Next},
     response::IntoResponse,
     routing::{any, get},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tower_http::{services::ServeDir, set_header::SetResponseHeaderLayer, trace::TraceLayer};
 
 #[derive(Debug)]
 pub struct Config {
     pub listen: SocketAddr,
+    pub agent_listen: SocketAddr,
+    pub data_dir: PathBuf,
     pub web_dir: PathBuf,
 }
 
@@ -23,10 +33,23 @@ impl Config {
             .parse::<SocketAddr>()
             .map_err(|_| "MCR_LISTEN must be an IP address and port, such as 127.0.0.1:3000")?;
         validate_listen(listen)?;
+        let agent_listen = std::env::var("MCR_AGENT_LISTEN")
+            .unwrap_or_else(|_| "127.0.0.1:8443".into())
+            .parse::<SocketAddr>()
+            .map_err(|_| "invalid MCR_AGENT_LISTEN")?;
+        validate_listen(agent_listen)?;
+        let data_dir = std::env::var_os("MCR_DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| ".local/server".into());
         let web_dir = std::env::var_os("MCR_WEB_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("web/dist"));
-        Ok(Self { listen, web_dir })
+        Ok(Self {
+            listen,
+            agent_listen,
+            data_dir,
+            web_dir,
+        })
     }
 }
 
@@ -43,6 +66,7 @@ pub fn validate_listen(address: SocketAddr) -> Result<(), String> {
 #[derive(Clone)]
 struct AppState {
     started: Instant,
+    runtime: Option<Arc<agent::AgentRuntime>>,
 }
 
 #[derive(Serialize)]
@@ -62,14 +86,14 @@ pub struct ServerInfo {
     pub capabilities: Capabilities,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceStatus {
     Online,
     Offline,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Device {
     pub id: String,
     pub name: String,
@@ -91,6 +115,10 @@ struct ApiError {
 }
 
 pub fn app(web_dir: PathBuf) -> Router {
+    app_with_runtime(web_dir, None)
+}
+
+pub fn app_with_runtime(web_dir: PathBuf, runtime: Option<Arc<agent::AgentRuntime>>) -> Router {
     let api = Router::new()
         .route("/v1/server", get(server_info))
         .route("/v1/devices", get(inventory))
@@ -117,9 +145,32 @@ pub fn app(web_dir: PathBuf) -> Router {
             ),
         ))
         .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(local_host_only))
         .with_state(AppState {
             started: Instant::now(),
+            runtime,
         })
+}
+
+async fn local_host_only(request: Request, next: Next) -> axum::response::Response {
+    // Binding to loopback alone does not prevent browser DNS rebinding.
+    if let Some(host) = request.headers().get(header::HOST) {
+        let valid = host
+            .to_str()
+            .ok()
+            .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
+            .is_some_and(|authority| {
+                let host = authority.host().trim_matches(['[', ']']);
+                host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|ip| ip.is_loopback())
+            });
+        if !valid {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
+    next.run(request).await
 }
 
 async fn health() -> Json<impl Serialize> {
@@ -137,7 +188,7 @@ async fn server_info(State(state): State<AppState>) -> Json<ServerInfo> {
         api_version: 1,
         uptime_seconds: state.started.elapsed().as_secs(),
         capabilities: Capabilities {
-            agent_enrollment: false,
+            agent_enrollment: state.runtime.is_some(),
             remote_desktop: false,
             terminal: false,
             file_transfer: false,
@@ -145,10 +196,13 @@ async fn server_info(State(state): State<AppState>) -> Json<ServerInfo> {
     })
 }
 
-async fn inventory() -> Json<Inventory> {
-    // An empty inventory is deliberate. Never turn decoded, unverified agent
-    // metadata into an online device. The authenticated registry is the next slice.
-    Json(Inventory { devices: vec![] })
+async fn inventory(State(state): State<AppState>) -> Json<Inventory> {
+    Json(Inventory {
+        devices: state
+            .runtime
+            .map(|runtime| runtime.registry.snapshot())
+            .unwrap_or_default(),
+    })
 }
 
 async fn agent_unavailable() -> impl IntoResponse {

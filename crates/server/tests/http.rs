@@ -96,3 +96,25 @@ fn development_server_rejects_network_exposure() {
         assert!(validate_listen(address.parse::<SocketAddr>().unwrap()).is_ok());
     }
 }
+
+#[tokio::test]
+async fn browser_dns_rebinding_hosts_are_rejected() {
+    for (host, status) in [
+        ("attacker.example:3000", StatusCode::FORBIDDEN),
+        ("127.0.0.1:3000", StatusCode::OK),
+        ("localhost:3000", StatusCode::OK),
+        ("[::1]:3000", StatusCode::OK),
+    ] {
+        let response = app(PathBuf::from("nonexistent-web-build"))
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/devices")
+                    .header("host", host)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
+}

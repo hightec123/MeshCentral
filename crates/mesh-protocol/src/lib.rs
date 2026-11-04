@@ -2,7 +2,8 @@
 //!
 //! Decoding does NOT authenticate a peer. In particular, certificate and signature
 //! bytes remain unverified. This crate must never grant enrollment or session rights.
-//! See upstream `meshagent.js` (commands 1–5 and 30) for the reference behavior.
+//! See upstream `meshagent.js` (commands 1–5 and 30) and native MeshAgent
+//! `agentcore.c` (host information, command 31) for the reference behavior.
 
 use std::{error::Error, fmt};
 
@@ -24,6 +25,7 @@ pub enum HandshakeFrame<'a> {
     ServerIdentityAccepted,
     ExpectedServerIdentity(&'a [u8]),
     AgentCommitDate(&'a str),
+    HostInfo(&'a str),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -126,6 +128,14 @@ pub fn decode_handshake(frame: &[u8]) -> Result<HandshakeFrame<'_>, DecodeError>
                 return Err(DecodeError::InvalidLength);
             }
             Ok(HandshakeFrame::AgentCommitDate(
+                std::str::from_utf8(&frame[2..]).map_err(|_| DecodeError::InvalidUtf8)?,
+            ))
+        }
+        31 => {
+            if frame.len() <= 2 || frame.len() > 514 {
+                return Err(DecodeError::InvalidLength);
+            }
+            Ok(HandshakeFrame::HostInfo(
                 std::str::from_utf8(&frame[2..]).map_err(|_| DecodeError::InvalidUtf8)?,
             ))
         }

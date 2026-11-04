@@ -9,18 +9,22 @@ for an installed MeshCentral server.
 
 Implemented:
 
-- Axum/Tokio HTTP server with liveness, version/capability, and empty inventory APIs.
+- Axum/Tokio HTTP console with liveness, capabilities, and persistent device inventory.
 - React console reading that API, with search, filters, refresh, and error recovery.
 - Production frontend assets served directly by Rust; Vite proxies the API in development.
-- Bounded binary decoders for agent handshake commands 1–5 and 30, checked against
-  fixtures encoded with upstream JavaScript helpers.
-- Loopback-only binding, disabled enrollment/relay endpoints, and local verification.
+- Native TLS/WebSocket listener with persistent server keys, mutual RSA/SHA-384
+  proofs, fresh nonces, exact node/mesh allowlisting, and real online/offline presence.
+- Bounded handshake decoding (commands 1–5, 30, 31), loopback-only binding,
+  browser-origin/Host restrictions, disabled remote sessions, and local verification.
 
-Not implemented: TLS, certificate proof verification, agent enrollment, device
-persistence/presence, user authentication/authorization, or remote sessions.
-The decoder crate is deliberately **not wired to a live WebSocket endpoint**.
-Decoded metadata does not create an authenticated identity or an online device.
-The first live-agent milestone has **not** been reached.
+The first live-agent milestone passed with an unmodified official macOS ARM64
+MeshAgent: authenticated connection, visible online in the console, offline on
+disconnect, and automatic reconnect after restarting Rust with stable identities.
+See [the lab guide](LAB.md) and [validation evidence](VALIDATION.md).
+
+Not implemented: operator accounts/RBAC, production migration, remote sessions,
+agent/core distribution, or legacy PKCS#7 proof wrappers. Only raw RSA signatures
+from explicitly approved lab identities are supported in this milestone.
 
 ## Run the preview
 
@@ -35,8 +39,10 @@ npm --prefix web run build
 cargo run --locked -p meshcentral-server
 ```
 
-Open <http://127.0.0.1:3000>. A new workspace has zero devices. Enrollment and
-remote session endpoints return HTTP 503; no agent is accepted or changed.
+Open <http://127.0.0.1:3000>. An uninitialized workspace has zero devices and no
+agent listener. Follow [LAB.md](LAB.md) to initialize an explicit lab policy.
+An initialized lab accepts native agents at `wss://127.0.0.1:8443/agent.ashx`.
+The HTTP console's `/agent.ashx` and all remote-session endpoints stay disabled.
 
 For frontend hot reload, keep the Rust process running and use another terminal:
 
@@ -51,10 +57,15 @@ Configuration:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `MCR_LISTEN` | `127.0.0.1:3000` | HTTP bind address; only loopback IPs are accepted |
+| `MCR_AGENT_LISTEN` | `127.0.0.1:8443` | Native TLS/WebSocket listener, also loopback only |
+| `MCR_DATA_DIR` | `.local/server` | Private server identity, admission policy, and inventory |
 | `MCR_WEB_DIR` | `web/dist` | Frontend build directory, relative to the process working directory |
 | `RUST_LOG` | `info` | Rust log filtering |
 
-Binding to all interfaces is intentionally unavailable before user authentication.
+Binding to all interfaces is unavailable before operator authentication. Native
+agent sockets reject browser Origin headers, and the console rejects non-loopback
+Host headers to prevent browser DNS rebinding. State directories/files require
+0700/0600 permissions on Unix; a process lock prevents concurrent state writers.
 No production settings, certificates, agents, or databases are imported automatically.
 
 ## Local checks
@@ -68,8 +79,11 @@ npm --prefix web exec -- playwright install chromium
 npm --prefix web run test:e2e
 ```
 
-Browser tests run the built frontend on a separate Rust process at
-`127.0.0.1:3100`, on desktop and mobile viewport profiles. They cover the real
+Rust tests include a real local TLS/WebSocket exchange and rejection cases for
+replay, tampering, TLS hash/identity mismatch, unauthorized nodes/meshes, duplicate
+commands, and browser-origin requests. They also check persistence and lab CLI
+idempotence. Browser tests run the built frontend on a separate Rust process at
+`127.0.0.1:3100` with isolated, uninitialized state, on desktop and mobile viewport profiles. They cover the real
 empty workspace and unavailable enrollment, error recovery, stale-data labeling,
 keyboard navigation, and search/filter behavior with explicitly injected test-only
 inventory. Screenshots and failure traces are saved under `web/test-results/`.
@@ -92,7 +106,7 @@ placeholder certificate/signature bytes to exercise framing only.
 ```text
 Cargo.toml                     Rust workspace
 crates/mesh-protocol/           Untrusted wire-message decoding and fixtures
-crates/server/                  HTTP server, API contract, and integration checks
+crates/server/                  HTTP/TLS server, identity, admission, presence, tests
 web/                           React/Vite console and browser tests
 docs/rust/COMPATIBILITY.md      Protocol evidence and next acceptance gates
 docs/rust/DESIGN.md             Console design decisions
@@ -100,7 +114,9 @@ meshagent.js                   Retained upstream agent protocol reference
 ```
 
 The protocol crate has no runtime dependencies. Keep wire parsing independent of
-HTTP, storage, and authentication. The new server does not depend on the upstream
+HTTP, storage, and authentication. The server uses vendored OpenSSL for X.509/RSA
+and rustls for transport; a C compiler, make and Perl are required for a fresh
+vendored OpenSSL build. The new server does not depend on the upstream
 Node.js server at runtime. Node.js is needed to build the frontend and regenerate
 reference fixtures; the built preview is served by a single Rust process.
 

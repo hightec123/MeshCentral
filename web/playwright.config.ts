@@ -22,7 +22,7 @@ export default defineConfig({
     command: 'cargo run --locked --offline -p meshcentral-server',
     cwd: root,
     url: 'http://127.0.0.1:3100/healthz',
-    env: { MCR_LISTEN: '127.0.0.1:3100', MCR_WEB_DIR: join(root, 'web/dist') },
+    env: { MCR_LISTEN: '127.0.0.1:3100', MCR_WEB_DIR: join(root, 'web/dist'), MCR_DATA_DIR: join(root, '.local/browser-tests-empty') },
     reuseExistingServer: false,
     timeout: 120_000,
     gracefulShutdown: { signal: 'SIGTERM', timeout: 5_000 },

@@ -79,7 +79,7 @@ export default function App() {
 
           <section className="inventory" aria-label="Device inventory" aria-busy={loading}>
             <div className="inventory-summary">
-              <div className="device-count"><strong>{snapshot ? devices.length : '—'}</strong> devices</div>
+              <div className="device-count"><strong>{snapshot ? devices.length : '—'}</strong> {devices.length === 1 ? 'device' : 'devices'}</div>
               <div className="presence-counts">
                 <span><span className="presence online" />{snapshot ? online : '—'} online</span>
                 <span><span className="presence offline" />{snapshot ? devices.length - online : '—'} offline</span>
@@ -128,7 +128,7 @@ export default function App() {
               <div className="empty-state">
                 <FleetIllustration />
                 <h2>{hasFilters ? 'No matching devices' : 'No devices connected yet'}</h2>
-                <p>{hasFilters ? 'Try a different search or clear your filters.' : 'Connected devices will appear here. Agent enrollment is not available in this preview.'}</p>
+                <p>{hasFilters ? 'Try a different search or clear your filters.' : snapshot.server.capabilities.agent_enrollment ? 'Start an approved lab agent to see it here.' : 'Connected devices will appear here. Agent enrollment is not available in this preview.'}</p>
                 {hasFilters ? (
                   <button className="button primary" type="button" onClick={clearFilters}>Clear filters</button>
                 ) : (
@@ -138,11 +138,11 @@ export default function App() {
             ) : null}
 
             <footer className="inventory-footer">
-              <span>{snapshot ? `${visible.length} of ${devices.length} devices` : 'Waiting for device information'}</span>
+              <span>{snapshot ? `${visible.length} of ${devices.length} ${devices.length === 1 ? 'device' : 'devices'}` : 'Waiting for device information'}</span>
               <span role="status">{snapshot ? `${error ? 'Last successful update' : 'Updated'} ${snapshot.fetchedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Connecting to server'}</span>
             </footer>
           </section>
-          <p className="page-note"><Icon name="info" />Existing agents will be supported. Keep devices connected to your current MeshCentral server while enrollment is being built.</p>
+          <p className="page-note"><Icon name="info" />{snapshot?.server.capabilities.agent_enrollment ? 'Approved lab agents can connect securely. Remote desktop, terminal and file transfer are not available yet.' : 'Existing agents will be supported. Keep devices connected to your current MeshCentral server while enrollment is being built.'}</p>
         </div>
       </main>
 
@@ -151,13 +151,13 @@ export default function App() {
           <button className="icon-button dialog-close" type="button" aria-label="Close preview information" onClick={() => about.current?.close()}><Icon name="close" /></button>
           <span className="dialog-icon"><Icon name="devices" /></span>
           <h2 id="preview-title">A new home for your devices</h2>
-          <p>This is the first development preview of MeshCentral’s Rust server and new console.</p>
+          <p>This local preview uses MeshCentral’s Rust server and existing agents. Only explicitly approved lab devices can connect.</p>
           <dl className="capability-list">
             <div><dt>Console and server connection</dt><dd>Available</dd></div>
-            <div><dt>Agent enrollment</dt><dd>Not available yet</dd></div>
+            <div><dt>Agent enrollment</dt><dd>{snapshot?.server.capabilities.agent_enrollment ? 'Approved lab agents only' : 'Not available yet'}</dd></div>
             <div><dt>Remote desktop, terminal and files</dt><dd>Not available yet</dd></div>
           </dl>
-          <p className="dialog-note">Existing MeshCentral agents are the compatibility target. No changes to your installed agents are needed for this preview.</p>
+          <p className="dialog-note">The lab uses unmodified agent binaries with separate configuration and keys. Keep production agents connected to your current server.</p>
           <div className="dialog-footer"><span>Version {snapshot?.server.version ?? 'unavailable'}</span><button className="button primary" type="button" onClick={() => about.current?.close()}>Got it</button></div>
         </div>
       </dialog>
