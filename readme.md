@@ -4,7 +4,7 @@
 > live alongside the original implementation. Start with [the Rust rewrite guide](docs/rust/README.md).
 > This local preview includes operator accounts, group permissions, agent certificate
 > authentication, terminal, file transfer, and desktop viewing tested with stock macOS/Linux agents.
-> Version 0.3.0 adds legacy signature support and encrypted offline backup/restore.
+> Version 0.4.0 adds Better Auth dashboard login; logout closes active remote sessions.
 > Full upstream parity remains in progress; see [the feature ledger](docs/rust/FEATURES.md).
 > The original MeshCentral source, agents, and Apache-2.0 license are retained below.
 

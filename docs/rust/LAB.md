@@ -91,7 +91,8 @@ the saved device remains in inventory and changes to offline.
 | `identity.json` | Persistent server agent certificate/key and separate TLS certificate/key |
 | `admission.json` | Exact mesh ID and explicitly allowed agent public-key fingerprints |
 | `inventory.json` | Saved device records; all records load offline until a fresh authenticated socket connects |
-| `operators.json` | User roles/group grants and Argon2id password hashes; sign-in sessions are memory-only |
+| `operators.json` | User roles/group grants and immutable Better Auth user IDs |
+| `dashboard-auth.json` / `dashboard-auth.sqlite` | Private Better Auth secrets, credential hashes and sessions; Rust supervises the loopback auth process |
 | `audit.json` | Last 500 account, group, device and remote-session lifecycle events; no file/terminal content |
 | `server.lock` | Exclusive process lock; a second writer/initializer is refused |
 

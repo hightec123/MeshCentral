@@ -265,11 +265,9 @@ async function main() {
       await workspace
         .getByRole("button", { name: "Open", exact: true })
         .click();
-      const proof = workspace
-        .getByRole("row")
-        .filter({
-          has: page.getByRole("cell", { name: inputName, exact: true }),
-        });
+      const proof = workspace.getByRole("row").filter({
+        has: page.getByRole("cell", { name: inputName, exact: true }),
+      });
       await expect(proof).toBeVisible({ timeout: 15000 });
       const pending = page.waitForEvent("download");
       await proof
@@ -331,6 +329,111 @@ async function main() {
     });
     await mobileContext.close();
     result.mobile_layout = true;
+    // Keep raw file/desktop sockets outside React's lifecycle so cross-tab UI
+    // cleanup cannot make a missing server-side logout revocation look correct.
+    const proofSockets = [];
+    for (const kind of ["files", "desktop"]) {
+      const response = await context.request.post(
+        credentials.url +
+          "/api/v1/devices/" +
+          encodeURIComponent(expected) +
+          "/sessions",
+        { headers: { "X-CSRF-Token": csrf }, data: { kind } },
+      );
+      expect(response.ok()).toBe(true);
+      proofSockets.push((await response.json()).socket_path);
+    }
+    await page.evaluate(async (paths) => {
+      window.mcrLogoutProof = { closed: 0, sockets: [] };
+      await Promise.all(
+        paths.map(
+          (path) =>
+            new Promise((resolve, reject) => {
+              const ws = new WebSocket(
+                (location.protocol === "https:" ? "wss://" : "ws://") +
+                  location.host +
+                  path,
+              );
+              window.mcrLogoutProof.sockets.push(ws);
+              ws.onclose = () => {
+                window.mcrLogoutProof.closed++;
+              };
+              ws.onerror = () =>
+                reject(new Error("Logout proof connection failed"));
+              ws.onmessage = (event) => {
+                if (typeof event.data === "string") {
+                  try {
+                    if (JSON.parse(event.data).event === "connected") resolve();
+                  } catch {}
+                }
+              };
+            }),
+        ),
+      );
+    }, proofSockets);
+    await page
+      .getByRole("button", { name: original.name, exact: true })
+      .click();
+    const terminalWorkspace = page.getByRole("dialog", { name: original.name });
+    await terminalWorkspace
+      .getByRole("tab", { name: "Terminal", exact: true })
+      .click();
+    await terminalWorkspace
+      .getByRole("button", { name: "Connect", exact: true })
+      .click();
+    await expect(
+      terminalWorkspace.getByText("Connected", { exact: true }),
+    ).toBeVisible();
+    const secondTab = await context.newPage();
+    await secondTab.goto(credentials.url);
+    await expect(
+      secondTab.getByRole("heading", { name: "Devices", exact: true }),
+    ).toBeVisible();
+    await secondTab
+      .getByRole("button", { name: "Sign out", exact: true })
+      .click();
+    await expect(
+      secondTab.getByRole("heading", { name: "Sign in to your workspace" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Sign in to your workspace" }),
+    ).toBeVisible();
+    await expect
+      .poll(() => page.evaluate(() => window.mcrLogoutProof.closed), {
+        timeout: 5000,
+      })
+      .toBe(2);
+    expect(
+      (await context.request.get(credentials.url + "/api/v1/devices")).status(),
+    ).toBe(401);
+    await secondTab.close();
+    result.logout_closes_native_remote_sessions = true;
+    await page
+      .getByLabel("Username", { exact: true })
+      .fill(credentials.username);
+    await page
+      .getByLabel("Password", { exact: true })
+      .fill(credentials.password);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await expect(
+      page.getByRole("heading", { name: "Devices", exact: true }),
+    ).toBeVisible();
+    csrf = (
+      await (
+        await context.request.get(credentials.url + "/api/v1/auth/session")
+      ).json()
+    ).csrf;
+    const remaining = await (
+      await context.request.get(credentials.url + "/api/v1/sessions")
+    ).json();
+    expect(remaining.sessions).toEqual([]);
+    const connected = await (
+      await context.request.get(credentials.url + "/api/v1/devices")
+    ).json();
+    expect(
+      connected.devices.find((device) => device.id === expected)?.status,
+    ).toBe("online");
+    result.agent_stays_online_after_logout = true;
     expect(errors).toEqual([]);
     fs.writeFileSync(
       path.join(

@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test.beforeEach(async ({ context }) => {
   const response = await context.request.post("/api/v1/auth/login", {
+    headers: { Origin: "http://127.0.0.1:3100" },
     data: { username: "test-admin", password: "browser-test-password-123" },
   });
   expect(response.ok()).toBe(true);

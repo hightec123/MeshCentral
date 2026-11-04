@@ -5,6 +5,7 @@ pub mod auth;
 pub mod backup;
 pub mod console;
 pub mod core;
+pub mod dashboard_auth;
 pub mod identity;
 pub mod management;
 pub mod operators;

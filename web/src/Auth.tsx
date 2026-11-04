@@ -6,6 +6,7 @@ import {
   useState,
 } from "react";
 import type { ReactNode, FormEvent } from "react";
+import { authClient } from "./auth-client";
 export type Operator = {
   username: string;
   role: "administrator" | "operator" | "viewer";
@@ -78,29 +79,57 @@ export function AuthGate({ children }: { children: ReactNode }) {
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
-    const signout = () => setAuth(null);
+    const signout = () => {
+      window.dispatchEvent(new Event("mcr-auth-revoking"));
+      setAuth(null);
+    };
+    const channel = new BroadcastChannel("meshcentral-dashboard-auth");
+    channel.onmessage = (event) => {
+      if (event.data === "revoking")
+        window.dispatchEvent(new Event("mcr-auth-revoking"));
+      if (event.data === "signed-out") signout();
+    };
     window.addEventListener("mcr-signout", signout);
     return () => {
       controller.abort();
       window.removeEventListener("mcr-signout", signout);
+      channel.close();
     };
   }, []);
   const logout = useCallback(async () => {
-    if (auth) await api("/auth/logout", auth.csrf, "POST");
+    window.dispatchEvent(new Event("mcr-auth-revoking"));
+    const channel = new BroadcastChannel("meshcentral-dashboard-auth");
+    channel.postMessage("revoking");
+    try {
+      const result = await authClient.signOut();
+      if (result.error)
+        setError(
+          "Sign-out could not reach the authentication service. Remote access has been closed locally.",
+        );
+    } catch {
+      setError("Authentication service unavailable. Retry sign-in shortly.");
+    }
     setAuth(null);
-  }, [auth]);
+    channel.postMessage("signed-out");
+    channel.close();
+  }, []);
   async function login(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError("");
     try {
-      const result = await api<{ user: Operator; csrf: string }>(
-        "/auth/login",
+      const signedIn = await authClient.signIn.username({ username, password });
+      if (signedIn.error)
+        throw new Error(
+          "Sign-in failed. Check your credentials or retry shortly.",
+        );
+      const result = await api<{ user: Operator | null; csrf: string }>(
+        "/auth/session",
         "",
-        "POST",
-        { username, password },
       );
-      setAuth(result);
+      if (!result.user)
+        throw new Error("This account does not have dashboard access.");
+      setAuth({ user: result.user, csrf: result.csrf });
       setPassword("");
     } catch (error) {
       setError(error instanceof Error ? error.message : "Sign-in failed.");

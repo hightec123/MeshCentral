@@ -61,6 +61,323 @@ fn proof(hash: &[u8], server_nonce: &[u8], agent_nonce: &[u8]) -> Vec<u8> {
     .concat()
 }
 
+#[tokio::test]
+async fn better_auth_logout_closes_terminal_files_and_desktop_but_preserves_another_sign_in() {
+    use axum_server::tls_rustls::RustlsConfig;
+    use futures_util::{SinkExt, StreamExt};
+    use meshcentral_server::{
+        agent::{self, AgentRuntime},
+        dashboard_auth::AuthProcess,
+        operators::Operators,
+        storage,
+    };
+    use serde_json::{Value, json};
+    use std::time::Duration;
+    use tokio_tungstenite::{
+        Connector, connect_async, connect_async_tls_with_config,
+        tungstenite::{Message, client::IntoClientRequest},
+    };
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    storage::private_directory(&state).unwrap();
+    FIXTURE
+        .server
+        .save_new(&state.join("identity.json"))
+        .unwrap();
+    storage::write_new(
+        &state.join("admission.json"),
+        &serde_json::to_vec(&*FIXTURE.policy).unwrap(),
+    )
+    .unwrap();
+    let runtime = AgentRuntime::open(&state).unwrap();
+    let operators = Operators::open(&state).unwrap();
+    operators
+        .bootstrap("admin", "better-auth-test-password")
+        .unwrap();
+    let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http_address = http_listener.local_addr().unwrap();
+    let origin = format!("http://{http_address}");
+    let mut auth = AuthProcess::start(&state, &origin, &operators)
+        .await
+        .unwrap();
+    let app = meshcentral_server::app_with_services(
+        "missing-web".into(),
+        Some(runtime.clone()),
+        Some(operators.clone()),
+    );
+    let http = tokio::spawn(async move {
+        axum::serve(http_listener, app).await.unwrap();
+    });
+    let tls = RustlsConfig::from_pem(
+        FIXTURE.server.tls_certificate.to_pem().unwrap(),
+        FIXTURE.server.tls_key.private_key_to_pem_pkcs8().unwrap(),
+    )
+    .await
+    .unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let native_address = listener.local_addr().unwrap();
+    let handle = axum_server::Handle::new();
+    let server_handle = handle.clone();
+    let native_app = agent::router(runtime.clone());
+    let native = tokio::spawn(async move {
+        axum_server::from_tcp_rustls(listener, tls)
+            .handle(server_handle)
+            .serve(native_app.into_make_service())
+            .await
+            .unwrap();
+    });
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(
+            FIXTURE.server.tls_certificate.to_der().unwrap(),
+        ))
+        .unwrap();
+    let connector = Connector::Rustls(Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    ));
+    let (mut parent, _) = connect_async_tls_with_config(
+        format!("wss://{native_address}/agent.ashx"),
+        None,
+        false,
+        Some(connector.clone()),
+    )
+    .await
+    .unwrap();
+    parent
+        .send(Message::Binary(
+            challenge(&FIXTURE.server.web_hash, &[39; 48]).into(),
+        ))
+        .await
+        .unwrap();
+    let Message::Binary(reply) = parent.next().await.unwrap().unwrap() else {
+        panic!("challenge missing")
+    };
+    parent.next().await.unwrap().unwrap();
+    parent
+        .send(Message::Binary(metadata(&FIXTURE.policy).into()))
+        .await
+        .unwrap();
+    parent
+        .send(Message::Binary(
+            proof(&FIXTURE.server.web_hash, &reply[50..], &[39; 48]).into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        parent.next().await.unwrap().unwrap(),
+        Message::Binary(vec![0, 4].into())
+    );
+    let node = runtime.registry.snapshot()[0].id.clone();
+    runtime
+        .registry
+        .telemetry(
+            &node,
+            "coreinfo",
+            json!({"action":"coreinfo","value":"controlled relay fixture"}),
+        )
+        .unwrap();
+    let monitor_store = operators.clone();
+    let monitor_runtime = runtime.clone();
+    let monitor = tokio::spawn(async move {
+        loop {
+            monitor_store.revalidate_dashboard_sessions().await;
+            monitor_runtime.relays.close_inactive(&monitor_store);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    });
+    let client = reqwest::Client::new();
+    let mut cookies = Vec::new();
+    let mut csrf = Vec::new();
+    for _ in 0..2 {
+        let response = client
+            .post(format!("{origin}/api/auth/sign-in/username"))
+            .header("origin", &origin)
+            .json(&json!({"username":"admin","password":"better-auth-test-password"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let cookie = response
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|value| {
+                value
+                    .to_str()
+                    .unwrap()
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let session: Value = client
+            .get(format!("{origin}/api/v1/auth/session"))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        csrf.push(session["csrf"].as_str().unwrap().to_owned());
+        cookies.push(cookie);
+    }
+    let mut browsers = Vec::new();
+    let mut agents = Vec::new();
+    for (kind, owner) in [
+        ("terminal", 0),
+        ("files", 0),
+        ("desktop", 0),
+        ("terminal", 1),
+    ] {
+        let response = client
+            .post(format!("{origin}/api/v1/devices/{node}/sessions"))
+            .header("cookie", &cookies[owner])
+            .header("origin", &origin)
+            .header("x-csrf-token", &csrf[owner])
+            .json(&json!({"kind":kind}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let room: Value = response.json().await.unwrap();
+        let ticket = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let message = parent.next().await.unwrap().unwrap();
+                if let Message::Binary(bytes) = message
+                    && bytes.first() == Some(&b'{')
+                {
+                    let command: Value = serde_json::from_slice(&bytes).unwrap();
+                    if command["type"] == "tunnel" {
+                        break command["value"]
+                            .as_str()
+                            .unwrap()
+                            .trim_start_matches('*')
+                            .to_owned();
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let (agent, _) = connect_async_tls_with_config(
+            format!("wss://{native_address}{ticket}"),
+            None,
+            false,
+            Some(connector.clone()),
+        )
+        .await
+        .unwrap();
+        let mut request = format!(
+            "ws://{http_address}{}",
+            room["socket_path"].as_str().unwrap()
+        )
+        .into_client_request()
+        .unwrap();
+        request
+            .headers_mut()
+            .insert("cookie", cookies[owner].parse().unwrap());
+        request
+            .headers_mut()
+            .insert("origin", origin.parse().unwrap());
+        let (mut browser, _) = connect_async(request).await.unwrap();
+        let connected = browser.next().await.unwrap().unwrap();
+        assert!(matches!(connected,Message::Text(value) if value.contains("connected")));
+        let mut agent = agent;
+        for _ in 0..3 {
+            assert!(matches!(agent.next().await, Some(Ok(Message::Text(_)))));
+        }
+        agent
+            .send(Message::Binary(b"before logout".to_vec().into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            browser.next().await.unwrap().unwrap(),
+            Message::Binary(b"before logout".to_vec().into())
+        );
+        browsers.push(browser);
+        agents.push(agent);
+    }
+    let response = client
+        .post(format!("{origin}/api/auth/sign-out"))
+        .header("cookie", &cookies[0])
+        .header("origin", &origin)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    for index in 0..3 {
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), browsers[index].next())
+                .await
+                .unwrap(),
+            Some(Ok(Message::Close(_))) | None
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), agents[index].next())
+                .await
+                .unwrap(),
+            Some(Ok(Message::Close(_))) | None
+        ));
+    }
+    assert_eq!(
+        client
+            .get(format!("{origin}/api/v1/devices"))
+            .header("cookie", &cookies[0])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    agents[3]
+        .send(Message::Binary(b"other sign-in survives".to_vec().into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        browsers[3].next().await.unwrap().unwrap(),
+        Message::Binary(b"other sign-in survives".to_vec().into())
+    );
+    assert_eq!(
+        runtime.registry.snapshot()[0].status,
+        DeviceStatus::Online,
+        "dashboard logout must not disconnect the certificate-authenticated agent"
+    );
+    // Direct upstream revocation is noticed independently of the logout route.
+    let user_id = operators.auth_user_id("admin").unwrap();
+    auth.bridge
+        .internal("revoke-user", json!({"user_id":user_id}))
+        .await
+        .unwrap();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(3), browsers[3].next())
+            .await
+            .unwrap(),
+        Some(Ok(Message::Close(_))) | None
+    ));
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(3), agents[3].next())
+            .await
+            .unwrap(),
+        Some(Ok(Message::Close(_))) | None
+    ));
+    monitor.abort();
+    parent.close(None).await.unwrap();
+    handle.shutdown();
+    native.await.unwrap();
+    http.abort();
+    auth.shutdown().await;
+}
+
 fn handshake(policy: Arc<AdmissionPolicy>) -> Handshake {
     Handshake::new(FIXTURE.server.clone(), policy).unwrap()
 }

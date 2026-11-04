@@ -49,8 +49,15 @@ async fn main() -> Result<()> {
             let _lock = storage::lock_directory(&config.data_dir)?;
             let mut password = String::new();
             std::io::stdin().take(130).read_to_string(&mut password)?;
-            meshcentral_server::operators::Operators::open(&config.data_dir)?
-                .bootstrap(&args[1], password.trim_end_matches(['\r', '\n']))?;
+            let operators = meshcentral_server::operators::Operators::open(&config.data_dir)?;
+            operators.bootstrap(&args[1], password.trim_end_matches(['\r', '\n']))?;
+            let mut auth = meshcentral_server::dashboard_auth::AuthProcess::start(
+                &config.data_dir,
+                &format!("http://{}", config.listen),
+                &operators,
+            )
+            .await?;
+            auth.shutdown().await;
             println!("Administrator created. Sign in through the local console.");
             return Ok(());
         }
@@ -81,6 +88,27 @@ async fn main() -> Result<()> {
         None
     };
     let operators = meshcentral_server::operators::Operators::open(&config.data_dir)?;
+    // Keep the state lock until the auth database has closed, even after both
+    // public listeners and their router state have been dropped.
+    let _runtime_lifetime = runtime.clone();
+    let mut auth = meshcentral_server::dashboard_auth::AuthProcess::start(
+        &config.data_dir,
+        &format!("http://{}", config.listen),
+        &operators,
+    )
+    .await?;
+    let monitor_store = operators.clone();
+    let monitor_runtime = runtime.clone();
+    let monitor = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(500));
+        loop {
+            tick.tick().await;
+            monitor_store.revalidate_dashboard_sessions().await;
+            if let Some(rt) = &monitor_runtime {
+                rt.relays.close_inactive(&monitor_store);
+            }
+        }
+    });
     if let Some(runtime) = &runtime {
         *runtime
             .agent_address
@@ -140,13 +168,17 @@ async fn main() -> Result<()> {
             }
             result = &mut http_task => { tls_handle.shutdown(); native.abort(); result??; anyhow::bail!("HTTP listener stopped unexpectedly"); }
             result = &mut native => { let _ = stop_tx.send(()); http_task.await??; result??; anyhow::bail!("native agent listener stopped unexpectedly"); }
+            result=auth.wait()=>{tls_handle.shutdown();http_task.abort();native.abort();monitor.abort();result?;}
         }
     } else {
         tokio::select! {
             () = shutdown() => { let _ = stop_tx.send(()); http_task.await??; }
             result = &mut http_task => { result??; anyhow::bail!("HTTP listener stopped unexpectedly"); }
+            result=auth.wait()=>{http_task.abort();monitor.abort();result?;}
         }
     }
+    monitor.abort();
+    auth.shutdown().await;
     Ok(())
 }
 

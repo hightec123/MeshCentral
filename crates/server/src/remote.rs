@@ -123,6 +123,10 @@ impl Hub {
             "device is not ready"
         );
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        ensure!(
+            operators.active(&p.session_key),
+            "dashboard session was revoked"
+        );
         entries.retain(|_, entry| {
             !entry.closed.load(Ordering::Acquire)
                 && entry.deadline > Instant::now()
@@ -204,6 +208,28 @@ impl Hub {
             .values()
             .filter(|e| e.info.node_id == node)
             .map(|e| e.info.id.clone())
+            .collect();
+        for id in ids {
+            self.close(&id);
+        }
+    }
+    pub fn close_owner(&self, owner: &[u8; 32]) {
+        self.close_matching(|entry| &entry.owner == owner);
+    }
+    pub fn close_username(&self, username: &str) {
+        self.close_matching(|entry| entry.info.username == username);
+    }
+    pub fn close_inactive(&self, operators: &Operators) {
+        self.close_matching(|entry| !operators.active(&entry.owner));
+    }
+    fn close_matching(&self, predicate: impl Fn(&Entry) -> bool) {
+        let ids: Vec<_> = self
+            .entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|entry| predicate(entry))
+            .map(|entry| entry.info.id.clone())
             .collect();
         for id in ids {
             self.close(&id);
@@ -340,11 +366,14 @@ async fn relay(
     let mut tick = interval(Duration::from_secs(1));
     loop {
         tokio::select! {
+         _=entry.ready.notified()=>{if entry.closed.load(Ordering::Acquire){break;}}
          _=tick.tick()=>{if entry.closed.load(Ordering::Acquire)||entry.deadline<=Instant::now()||!entry.operators.active(&entry.owner)||entry.registry.device(&entry.info.node_id).is_none_or(|d|d.status!=DeviceStatus::Online||!d.core_ready){break;}}
             message=incoming.recv()=>{let Some(message)=message else{break;};if entry.closed.load(Ordering::Acquire)||!entry.operators.active(&entry.owner){break;}
-                if socket.send(message).await.is_err(){break;}}
+                let sent=tokio::select!{_=entry.ready.notified()=>false,result=timeout(Duration::from_secs(2),socket.send(message))=>matches!(result,Ok(Ok(())))};
+                if !sent {break;}}
          message=socket.recv()=>{match message{Some(Ok(Message::Ping(bytes)))=>{if socket.send(Message::Pong(bytes)).await.is_err(){break;}},Some(Ok(Message::Pong(_)))=>{},Some(Ok(Message::Close(_)))|Some(Err(_))|None=>break,Some(Ok(message))=>{if entry.closed.load(Ordering::Acquire)||!entry.operators.active(&entry.owner){break;}
-                if !matches!(timeout(Duration::from_secs(10),destination.send(message)).await,Ok(Ok(()))){break;}}}}
+                let sent=tokio::select!{_=entry.ready.notified()=>false,result=timeout(Duration::from_secs(10),destination.send(message))=>matches!(result,Ok(Ok(())))};
+                if !sent {break;}}}}
         }
     }
     let _ = socket.send(Message::Close(None)).await;

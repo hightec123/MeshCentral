@@ -1,5 +1,34 @@
 import { expect, test } from "@playwright/test";
 
+test("sign-out updates another dashboard tab sharing the same Better Auth session", async ({
+  page,
+  context,
+}) => {
+  const login = await context.request.post("/api/v1/auth/login", {
+    headers: { Origin: "http://127.0.0.1:3100" },
+    data: { username: "test-admin", password: "browser-test-password-123" },
+  });
+  expect(login.ok()).toBe(true);
+  await page.goto("/");
+  const other = await context.newPage();
+  await other.goto("/");
+  await expect(
+    page.getByRole("heading", { name: "Devices", exact: true }),
+  ).toBeVisible();
+  await expect(
+    other.getByRole("heading", { name: "Devices", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Sign in to your workspace" }),
+  ).toBeVisible();
+  await expect(
+    other.getByRole("heading", { name: "Sign in to your workspace" }),
+  ).toBeVisible();
+  expect((await context.request.get("/api/v1/devices")).status()).toBe(401);
+  await other.close();
+});
+
 test("sign-in form validates credentials and sign-out protects the inventory", async ({
   page,
   context,
@@ -35,6 +64,7 @@ test("administrator can create a viewer without granting account-management righ
   expect(
     (
       await request.post("/api/v1/auth/login", {
+        headers: { Origin: "http://127.0.0.1:3100" },
         data: { username: "test-admin", password: "browser-test-password-123" },
       })
     ).ok(),
@@ -92,6 +122,7 @@ test("account password change revokes its session and requires the new password"
 }, info) => {
   const request = context.request;
   const admin = await request.post("/api/v1/auth/login", {
+    headers: { Origin: "http://127.0.0.1:3100" },
     data: { username: "test-admin", password: "browser-test-password-123" },
   });
   const auth = await admin.json();
@@ -110,6 +141,7 @@ test("account password change revokes its session and requires the new password"
   expect(
     (
       await request.post("/api/v1/auth/login", {
+        headers: { Origin: "http://127.0.0.1:3100" },
         data: { username, password: "original-password-123" },
       })
     ).ok(),
@@ -132,6 +164,7 @@ test("account password change revokes its session and requires the new password"
   expect(
     (
       await request.post("/api/v1/auth/login", {
+        headers: { Origin: "http://127.0.0.1:3100" },
         data: { username, password: "original-password-123" },
       })
     ).status(),
@@ -139,6 +172,7 @@ test("account password change revokes its session and requires the new password"
   expect(
     (
       await request.post("/api/v1/auth/login", {
+        headers: { Origin: "http://127.0.0.1:3100" },
         data: { username, password: "replacement-password-123" },
       })
     ).ok(),

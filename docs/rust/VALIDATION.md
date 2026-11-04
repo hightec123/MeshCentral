@@ -1,9 +1,50 @@
 # Validation evidence
 
-## Compatibility and recovery milestone — version 0.3.0
+## Better Auth dashboard milestone — version 0.4.0
 
-Date: 4 November 2026 (Pacific/Auckland). This section describes the current
-preview; the earlier sections are historical milestones.
+Date: 4 November 2026 (Pacific/Auckland). Dashboard authentication now uses the
+official Better Auth 1.7.16 package and React client, supervised by Rust through
+a private Bun/SQLite service. Native agent certificate authentication remains Rust.
+
+| Check | Result |
+| --- | --- |
+| Rust tests | 61 passed: 16 protocol, 9 server unit, 17 authentication/TLS, 3 backup, 1 dashboard fail-closed, 7 HTTP, 8 operator/management |
+| Private auth service | TypeScript check and 3 Bun integration tests passed |
+| Dashboard | TypeScript/Vite build and 22 desktop/mobile browser tests passed |
+| Real relay logout | Actual browser/native TLS WebSockets for terminal, files and desktop closed on logout; another sign-in and parent agent remained connected |
+| Upstream revocation | Direct Better Auth session revocation ended both remaining relay sockets |
+| Existing credentials | Stock macOS/Linux lab administrators retained their original passwords after automatic Argon2 import |
+| Live macOS/Linux acceptance | Terminal, byte-exact files, desktop images, cross-tab logout closure, fresh sign-in and agent-stays-online checks all passed; Linux input sink also passed |
+| Encrypted recovery | Auth database and secrets recovered together; original password and immutable identity mapping worked; restored session cookies were refused |
+
+Negative checks cover private-service/provisioning bypasses, public signup denial,
+legacy Rust cookie rejection, auth-service unavailability, matching usernames
+with a different auth ID, and in-flight validation after logout. Malformed
+password JSON fails without a handler panic. Rust retains device roles/group
+permissions; Better Auth account metadata cannot grant device access.
+
+Live logout acceptance keeps raw file/desktop sockets outside React's component
+lifecycle, signs out from another tab, observes both sockets close, verifies the
+old cookie is unauthorized, and signs in again to confirm no active rooms remain
+and the same stock agent is online. This avoids mistaking frontend cleanup for
+server revocation. The TLS regression separately verifies all three relay types,
+both sides, a separate sign-in and out-of-band upstream revocation.
+
+The first live run found duplicate expired-cookie cleanup requests. The frontend
+now signals revocation across tabs before unmounting remote controls, and remote
+socket-close handlers rely on Rust's relay lease cleanup rather than sending
+another DELETE after sign-out. Final live checks recorded no browser errors.
+
+Local evidence remains in ignored `management-ui-acceptance.json` and
+`linux-management-ui-acceptance.json`, including
+`logout_closes_native_remote_sessions: true` and
+`agent_stays_online_after_logout: true`. Encrypted pre-integration backups are
+private. No production service, agent installation, trust store or binary changed.
+See [AUTH.md](AUTH.md) for setup, session boundaries, process supervision and recovery.
+
+## Compatibility and recovery milestone — version 0.3.0 (historical)
+
+Date: 4 November 2026 (Pacific/Auckland). Earlier compatibility/recovery acceptance.
 
 | Check | Result |
 | --- | --- |

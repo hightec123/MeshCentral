@@ -23,6 +23,8 @@ const FILES: &[&str] = &[
     "inventory.json",
     "operators.json",
     "audit.json",
+    "dashboard-auth.json",
+    "dashboard-auth.sqlite",
 ];
 const FORMAT: &str = "meshcentral-rust-backup";
 const KDF: &str = "argon2id-v19-m19456-t2-p1";
@@ -49,7 +51,10 @@ struct Snapshot {
 }
 impl Snapshot {
     fn validate(&self) -> Result<()> {
-        ensure!(self.schema_version == 1, "unsupported snapshot schema");
+        ensure!(
+            matches!(self.schema_version, 1 | 2),
+            "unsupported snapshot schema"
+        );
         chrono::DateTime::parse_from_rfc3339(&self.created_at)?;
         ensure!(
             self.files.contains_key("operators.json"),
@@ -65,11 +70,36 @@ impl Snapshot {
         );
         for (name, value) in &self.files {
             ensure!(FILES.contains(&name.as_str()), "unknown snapshot file");
+            if name == "dashboard-auth.sqlite" {
+                let bytes =
+                    STANDARD.decode(value.as_str().context("invalid auth database encoding")?)?;
+                ensure!(
+                    bytes.len() <= 4 * 1024 * 1024 && bytes.starts_with(b"SQLite format 3\0"),
+                    "invalid auth database snapshot"
+                );
+                continue;
+            }
             ensure!(
                 serde_json::to_vec_pretty(value)?.len() <= 1024 * 1024,
                 "snapshot file is too large"
             );
         }
+        let migrated = self.files["operators.json"]["users"]
+            .as_object()
+            .is_some_and(|users| {
+                users
+                    .values()
+                    .any(|record| record["auth_user_id"].is_string())
+            });
+        ensure!(
+            self.files.contains_key("dashboard-auth.json")
+                == self.files.contains_key("dashboard-auth.sqlite"),
+            "auth database and secrets must be backed up together"
+        );
+        ensure!(
+            !migrated || self.files.contains_key("dashboard-auth.sqlite"),
+            "Better Auth identity is missing its database"
+        );
         Ok(())
     }
 }
@@ -154,15 +184,28 @@ fn decrypt(bytes: &[u8], password: &str) -> Result<Snapshot> {
 pub fn create(data_dir: &Path, output: &Path, password: &str) -> Result<()> {
     ensure!(data_dir.is_dir(), "server state directory does not exist");
     let _lock = storage::lock_directory(data_dir)?;
+    for suffix in ["-journal", "-wal", "-shm"] {
+        ensure!(
+            !data_dir
+                .join(format!("dashboard-auth.sqlite{suffix}"))
+                .try_exists()?,
+            "auth database has an active or recovery journal; stop authentication cleanly before backing up"
+        );
+    }
     let mut files = BTreeMap::new();
     for name in FILES {
         let file = data_dir.join(name);
         if file.try_exists()? {
-            files.insert(name.to_string(), storage::read_json(&file)?);
+            let value = if *name == "dashboard-auth.sqlite" {
+                Value::String(STANDARD.encode(storage::read_private(&file, 4 * 1024 * 1024)?))
+            } else {
+                storage::read_json(&file)?
+            };
+            files.insert(name.to_string(), value);
         }
     }
     let snapshot = Snapshot {
-        schema_version: 1,
+        schema_version: 2,
         created_at: chrono::Utc::now().to_rfc3339(),
         files,
     };
@@ -212,7 +255,12 @@ pub fn restore(archive: &Path, destination: &Path, password: &str) -> Result<()>
     ensure!(!staging.0.try_exists()?, "restore staging already exists");
     storage::private_directory(&staging.0)?;
     for (name, value) in &snapshot.files {
-        storage::write_new(&staging.0.join(name), &serde_json::to_vec_pretty(value)?)?;
+        let bytes = if name == "dashboard-auth.sqlite" {
+            STANDARD.decode(value.as_str().context("invalid database encoding")?)?
+        } else {
+            serde_json::to_vec_pretty(value)?
+        };
+        storage::write_new(&staging.0.join(name), &bytes)?;
     }
     if snapshot.files.contains_key("identity.json") {
         Identity::load(&staging.0.join("identity.json"))?;

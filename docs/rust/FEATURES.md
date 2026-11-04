@@ -1,6 +1,6 @@
 # MeshCentral compatibility work
 
-Version 0.3.0 is a compatibility/recovery development preview, **not full upstream parity**.
+Version 0.4.0 adds Better Auth dashboard authentication, **not full upstream parity**.
 A feature is accepted only when its behavior is implemented and checked. Retained
 upstream source alone does not imply support in the Rust server.
 
@@ -8,7 +8,7 @@ upstream source alone does not imply support in the Rust server.
 | --- | --- |
 | Existing-agent certificate identity, pinning and admission | Verified with stock macOS ARM64 and Linux ARM64 agents |
 | Persistent device inventory and presence | Verified |
-| Operator login, logout, password hashing, session revocation | Implemented; Rust and desktop/mobile browser tests |
+| Operator login, logout, password hashing, session revocation | Better Auth 1.7.16 + React client, Rust supervision/live identity bridge; original passwords imported, logout closes native/browser relays, cross-tab UI and upstream revocation checked |
 | Users, roles and group-scoped permissions | Implemented; API denial tests and browser account workflow |
 | Device groups, enrollment configuration, device metadata | Implemented; group lifecycle/API tests and real metadata edit/restore |
 | Agent core distribution and live system information | macOS and Linux accepted; Windows bundle generated, not live-accepted |
@@ -26,7 +26,7 @@ upstream source alone does not imply support in the Rust server.
 | Encrypted offline backups and restore | Implemented; pinned identity/accounts/metadata retained, live presence/sessions reset, wrong password/tampering/overwrite/active-state refusals tested; see [RECOVERY.md](RECOVERY.md) |
 | Multitenancy, database backends and operational tooling | Planned; scheduled backup/retention and fleet-scale recovery remain outstanding |
 
-The current process is a single local Rust server with bounded JSON state, an
+The preview is a local Rust server supervising a private Bun/SQLite auth service, with bounded state, an
 eight-hour absolute/one-hour idle operator session, a 500-event audit window, and
 up to 16 remote sessions. These are preview limits, not production capacity claims.
 Admission supports up to 64 groups and 32 approved agent identities per group;
@@ -36,3 +36,4 @@ Windows live acceptance is pending a disposable lab VM (none is currently
 available). Next independent implementation targets are MFA/account recovery,
 HTTPS deployment support, and scoped automation/advanced connectivity. Existing
 agent trust/database migration and production rollout remain separate release gates.
+See [AUTH.md](AUTH.md) for the auth boundary, migration, logout and recovery behavior.

@@ -5,6 +5,7 @@ test("desktop input requires explicit control and stays scoped to its canvas", a
   context,
 }) => {
   await context.request.post("/api/v1/auth/login", {
+    headers: { Origin: "http://127.0.0.1:3100" },
     data: { username: "test-admin", password: "browser-test-password-123" },
   });
   const device = {

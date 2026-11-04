@@ -16,13 +16,14 @@ export function useRemote(
   callbacks.current = { onData, onReady };
   const mounted = useRef(true);
   const connecting = useRef(false);
+  const revoking = useRef(false);
   const close = useCallback(() => {
     socket.current?.close();
     socket.current = null;
     const id = session.current;
     session.current = null;
     connecting.current = false;
-    if (id)
+    if (id && !revoking.current)
       void api("/sessions/" + encodeURIComponent(id), csrf, "DELETE").catch(
         () => {},
       );
@@ -41,11 +42,12 @@ export function useRemote(
         kind,
       });
       if (!mounted.current) {
-        void api(
-          "/sessions/" + encodeURIComponent(remote.session.id),
-          csrf,
-          "DELETE",
-        ).catch(() => {});
+        if (!revoking.current)
+          void api(
+            "/sessions/" + encodeURIComponent(remote.session.id),
+            csrf,
+            "DELETE",
+          ).catch(() => {});
         return;
       }
       session.current = remote.session.id;
@@ -86,11 +88,7 @@ export function useRemote(
         socket.current = null;
         session.current = null;
         connecting.current = false;
-        void api(
-          "/sessions/" + encodeURIComponent(remote.session.id),
-          csrf,
-          "DELETE",
-        ).catch(() => {});
+        // Rust's relay lease already removes the room and closes its peer.
         if (mounted.current) setStatus("Disconnected");
       };
     } catch (e) {
@@ -103,7 +101,13 @@ export function useRemote(
   }, [node, kind, csrf]);
   useEffect(() => {
     mounted.current = true;
+    const onRevoke = () => {
+      revoking.current = true;
+      close();
+    };
+    window.addEventListener("mcr-auth-revoking", onRevoke);
     return () => {
+      window.removeEventListener("mcr-auth-revoking", onRevoke);
       mounted.current = false;
       close();
     };

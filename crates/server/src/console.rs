@@ -40,6 +40,7 @@ pub fn operators(state: &AppState) -> ApiResult<Arc<Operators>> {
 
 pub fn public_routes() -> Router<AppState> {
     Router::new()
+        .route("/auth/{*path}", axum::routing::any(auth_proxy))
         .route("/v1/auth/session", get(session))
         .route("/v1/auth/login", post(login))
 }
@@ -90,7 +91,15 @@ pub async fn require_operator(
     let Some(store) = state.operators.as_ref() else {
         return unauthorized().into_response();
     };
-    let Some(principal) = token(request.headers()).and_then(|t| store.authenticate(t)) else {
+    let principal = if store.auth().is_some() {
+        match store.dashboard_principal(cookie(request.headers())).await {
+            Ok(value) => value,
+            Err(_) => return auth_unavailable().into_response(),
+        }
+    } else {
+        token(request.headers()).and_then(|t| store.authenticate(t))
+    };
+    let Some(principal) = principal else {
         return unauthorized().into_response();
     };
     if !same_origin(request.headers()) {
@@ -111,17 +120,28 @@ pub async fn require_operator(
     request.extensions_mut().insert(principal);
     next.run(request).await
 }
-async fn session(State(state): State<AppState>, headers: HeaderMap) -> Json<serde_json::Value> {
-    let principal = state
-        .operators
-        .as_ref()
-        .and_then(|store| token(&headers).and_then(|t| store.authenticate(t)));
-    Json(match principal {
+async fn session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<serde_json::Value>> {
+    let principal = if let Some(store) = &state.operators {
+        if store.auth().is_some() {
+            store
+                .dashboard_principal(cookie(&headers))
+                .await
+                .map_err(|_| auth_unavailable())?
+        } else {
+            token(&headers).and_then(|t| store.authenticate(t))
+        }
+    } else {
+        None
+    };
+    Ok(Json(match principal {
         Some(p) => json!({"user":p.user,"csrf":p.csrf,"setup_required":false}),
         None => {
             json!({"user":null,"csrf":null,"setup_required":state.operators.as_ref().is_none_or(|s|!s.initialized())})
         }
-    })
+    }))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -138,6 +158,48 @@ async fn login(
         return Err(forbidden());
     }
     let store = operators(&state)?;
+    if let Some(auth) = store.auth() {
+        let mut reply = auth
+            .request(
+                "sign-in/username",
+                "POST",
+                &headers,
+                serde_json::to_vec(&json!({"username":body.username,"password":body.password}))
+                    .map_err(bad)?,
+            )
+            .await
+            .map_err(|_| auth_unavailable())?;
+        if reply.status.is_success() {
+            let cookie = reply
+                .headers
+                .get_all("set-cookie")
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .filter_map(|value| value.split(';').next())
+                .collect::<Vec<_>>()
+                .join("; ");
+            let principal = store
+                .dashboard_principal(&cookie)
+                .await
+                .map_err(|_| auth_unavailable())?
+                .ok_or_else(forbidden)?;
+            reply.body = serde_json::to_vec(
+                &json!({"user":principal.user,"csrf":principal.csrf,"setup_required":false}),
+            )
+            .map_err(bad)?;
+        }
+        let _ = store.audit.record(
+            &body.username,
+            "account.login",
+            "",
+            if reply.status.is_success() {
+                "success"
+            } else {
+                "denied"
+            },
+        );
+        return Ok(reply_response(reply));
+    }
     let (cookie,p)=store.login(&body.username,body.password).await.map_err(|_|ApiFailure(StatusCode::UNAUTHORIZED,"Sign-in failed. Check your credentials, or wait one minute after repeated attempts.".into()))?;
     let mut response =
         Json(json!({"user":p.user,"csrf":p.csrf,"setup_required":false})).into_response();
@@ -152,8 +214,15 @@ async fn login(
 async fn logout(
     State(state): State<AppState>,
     Extension(p): Extension<Principal>,
+    headers: HeaderMap,
 ) -> ApiResult<Response> {
+    if operators(&state)?.auth().is_some() {
+        return proxy(&state, "sign-out", "POST", &headers, b"{}".to_vec()).await;
+    }
     operators(&state)?.logout(&p).map_err(bad)?;
+    if let Some(rt) = &state.runtime {
+        rt.relays.close_owner(&p.session_key);
+    }
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -171,8 +240,17 @@ struct Password {
 async fn password(
     State(state): State<AppState>,
     Extension(p): Extension<Principal>,
+    headers: HeaderMap,
     Json(body): Json<Password>,
 ) -> ApiResult<StatusCode> {
+    if operators(&state)?.auth().is_some() {
+        let response=proxy(&state,"change-password","POST",&headers,serde_json::to_vec(&json!({"currentPassword":body.current,"newPassword":body.new,"revokeOtherSessions":true})).map_err(bad)?).await?;
+        if response.status().is_success() {
+            return Ok(StatusCode::NO_CONTENT);
+        } else {
+            return Err(bad("Password change failed. Check your current password."));
+        }
+    }
     operators(&state)?
         .change_password(&p, body.current, body.new)
         .await
@@ -202,6 +280,16 @@ async fn save_user(
         return Err(forbidden());
     }
     let store = operators(&state)?;
+    if store.auth().is_some() {
+        store
+            .save_dashboard_user(&p, body.user.clone(), body.password)
+            .await
+            .map_err(bad)?;
+        if let Some(rt) = &state.runtime {
+            rt.relays.close_username(&body.user.username);
+        }
+        return Ok(StatusCode::NO_CONTENT);
+    }
     tokio::task::spawn_blocking(move || store.save_user(&p, body.user, body.password.as_deref()))
         .await
         .map_err(bad)?
@@ -216,8 +304,159 @@ async fn delete_user(
     if !p.user.admin() {
         return Err(forbidden());
     }
-    operators(&state)?.delete_user(&p, &username).map_err(bad)?;
+    let store = operators(&state)?;
+    let id = store.auth_user_id(&username);
+    store.delete_user(&p, &username).map_err(bad)?;
+    if let Some(rt) = &state.runtime {
+        rt.relays.close_username(&username);
+    }
+    if let (Some(auth), Some(id)) = (store.auth(), id) {
+        auth.internal("delete-user", json!({"user_id":id}))
+            .await
+            .map_err(bad)?;
+    }
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub fn cookie(headers: &HeaderMap) -> &str {
+    headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+}
+fn auth_unavailable() -> ApiFailure {
+    ApiFailure(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Dashboard authentication is unavailable. Retry shortly.".into(),
+    )
+}
+fn reply_response(reply: crate::dashboard_auth::Reply) -> Response {
+    (reply.status, reply.headers, reply.body).into_response()
+}
+async fn auth_proxy(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    request: Request,
+) -> ApiResult<Response> {
+    let method = request.method().as_str().to_owned();
+    let headers = request.headers().clone();
+    let body = axum::body::to_bytes(request.into_body(), 64 * 1024)
+        .await
+        .map_err(bad)?;
+    proxy(&state, &path, &method, &headers, body.to_vec()).await
+}
+async fn proxy(
+    state: &AppState,
+    path: &str,
+    method: &str,
+    headers: &HeaderMap,
+    mut body: Vec<u8>,
+) -> ApiResult<Response> {
+    if ![
+        "sign-in/username",
+        "sign-out",
+        "get-session",
+        "change-password",
+        "list-sessions",
+        "revoke-session",
+        "revoke-sessions",
+        "revoke-other-sessions",
+    ]
+    .contains(&path)
+    {
+        return Err(ApiFailure(
+            StatusCode::NOT_FOUND,
+            "Unknown authentication endpoint.".into(),
+        ));
+    }
+    if !same_origin(headers) {
+        return Err(forbidden());
+    }
+    let store = operators(state)?;
+    let auth = store.auth().ok_or_else(auth_unavailable)?;
+    let mutation = [
+        "sign-out",
+        "change-password",
+        "revoke-session",
+        "revoke-sessions",
+        "revoke-other-sessions",
+    ]
+    .contains(&path);
+    if (mutation && method != "POST") || (!mutation && !["GET", "POST"].contains(&method)) {
+        return Err(bad("Unsupported auth method."));
+    }
+    let principal = if mutation {
+        store
+            .dashboard_principal(cookie(headers))
+            .await
+            .ok()
+            .flatten()
+            .or_else(|| store.cached_dashboard(cookie(headers)))
+    } else {
+        None
+    };
+    if path == "sign-out"
+        && let Some(p) = &principal
+    {
+        store.revoke_key(&p.session_key);
+        if let Some(rt) = &state.runtime {
+            rt.relays.close_owner(&p.session_key);
+        }
+        let _ = store
+            .audit
+            .record(&p.user.username, "account.logout", "", "requested");
+    }
+    if path == "change-password" {
+        let mut value: serde_json::Value = serde_json::from_slice(&body).map_err(bad)?;
+        value
+            .as_object_mut()
+            .ok_or_else(|| bad("Password request must be a JSON object."))?
+            .insert("revokeOtherSessions".into(), true.into());
+        body = serde_json::to_vec(&value).map_err(bad)?;
+    }
+    let reply = auth
+        .request(path, method, headers, body.clone())
+        .await
+        .map_err(|_| auth_unavailable())?;
+    if reply.status.is_success() && mutation {
+        if path == "change-password"
+            && let Some(p) = &principal
+        {
+            store.revoke_user(&p.user.username);
+            if let Some(rt) = &state.runtime {
+                rt.relays.close_username(&p.user.username);
+            }
+            if let Some(id) = store.auth_user_id(&p.user.username) {
+                auth.internal("revoke-user", json!({"user_id":id}))
+                    .await
+                    .map_err(|_| auth_unavailable())?;
+            }
+            let _ = store
+                .audit
+                .record(&p.user.username, "account.password", "", "success");
+        }
+        store.revalidate_dashboard_sessions().await;
+        if let Some(rt) = &state.runtime {
+            rt.relays.close_inactive(&store);
+        }
+    }
+    if path == "sign-in/username" {
+        let username = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value["username"].as_str().map(str::to_owned))
+            .unwrap_or_default();
+        let _ = store.audit.record(
+            &username,
+            "account.login",
+            "",
+            if reply.status.is_success() {
+                "success"
+            } else {
+                "denied"
+            },
+        );
+    }
+    Ok(reply_response(reply))
 }
 async fn audit(
     State(state): State<AppState>,

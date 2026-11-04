@@ -206,3 +206,104 @@ fn cli_requires_offline_state_and_refuses_existing_paths_or_wrong_passwords() {
             .starts_with(".restore-")
     }));
 }
+
+#[tokio::test]
+async fn better_auth_database_and_secret_survive_encrypted_recovery_with_original_credentials() {
+    use axum::http::HeaderMap;
+    use meshcentral_server::dashboard_auth::AuthProcess;
+    use serde_json::json;
+    let dir = private_tempdir();
+    let state = dir.path().join("state");
+    storage::private_directory(&state).unwrap();
+    let store = Operators::open(&state).unwrap();
+    store.bootstrap("admin", "legacy-argon-password").unwrap();
+    let before: serde_json::Value = storage::read_json(&state.join("operators.json")).unwrap();
+    assert!(
+        before["users"]["admin"]["password_hash"]
+            .as_str()
+            .unwrap()
+            .starts_with("$argon2id$")
+    );
+    let mut auth = AuthProcess::start(&state, "http://127.0.0.1:3300", &store)
+        .await
+        .unwrap();
+    let mapped_id = store.auth_user_id("admin").unwrap();
+    let after: serde_json::Value = storage::read_json(&state.join("operators.json")).unwrap();
+    assert!(after["users"]["admin"].get("password_hash").is_none());
+    let mut headers = HeaderMap::new();
+    headers.insert("origin", "http://127.0.0.1:3300".parse().unwrap());
+    headers.insert("content-type", "application/json".parse().unwrap());
+    let login = auth
+        .bridge
+        .request(
+            "sign-in/username",
+            "POST",
+            &headers,
+            serde_json::to_vec(&json!({"username":"admin","password":"legacy-argon-password"}))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status, 200);
+    let cookie = login
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|value| {
+            value
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(
+        store
+            .dashboard_principal(&cookie)
+            .await
+            .unwrap()
+            .unwrap()
+            .user
+            .admin()
+    );
+    auth.shutdown().await;
+    let archive = dir.path().join("better-auth.mcrbackup");
+    backup::create(&state, &archive, "encrypted-auth-backup-password").unwrap();
+    let destination = dir.path().join("restored");
+    backup::restore(&archive, &destination, "encrypted-auth-backup-password").unwrap();
+    let restored = Operators::open(&destination).unwrap();
+    assert_eq!(
+        restored.auth_user_id("admin").as_deref(),
+        Some(mapped_id.as_str())
+    );
+    let mut recovered_auth = AuthProcess::start(&destination, "http://127.0.0.1:3300", &restored)
+        .await
+        .unwrap();
+    assert!(
+        restored
+            .dashboard_principal(&cookie)
+            .await
+            .unwrap()
+            .is_none(),
+        "old sessions must not revive after restore"
+    );
+    let login = recovered_auth
+        .bridge
+        .request(
+            "sign-in/username",
+            "POST",
+            &headers,
+            serde_json::to_vec(&json!({"username":"admin","password":"legacy-argon-password"}))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        login.status, 200,
+        "original imported password must remain usable"
+    );
+    recovered_auth.shutdown().await;
+}

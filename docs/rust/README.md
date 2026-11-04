@@ -11,7 +11,9 @@ Implemented:
 
 - Axum/Tokio console and React UI with persistent inventory, search, filters, and
   device names, notes, tags, system information, disconnect, and offline removal.
-- Argon2id operator passwords, revocable cookie sessions, CSRF/origin protection,
+- Better Auth dashboard login through its React client and a private supervised
+  Bun/SQLite service, imported Argon2id passwords, live cookie-session validation,
+  logout closing active relays, CSRF/origin protection,
   account management, password changes, and administrator/operator/viewer roles.
 - Device groups, group-scoped permissions, explicit certificate fingerprint
   approval, pinned agent configuration downloads, audit history, and session closure.
@@ -37,12 +39,14 @@ transfer, desktop rendering, authorization, audit, and session cleanup. See
 
 ## Run the preview
 
-Requires Rust **1.99.1** (selected by `rust-toolchain.toml`) and Node.js **22.12+**.
+Requires Rust **1.99.1** (selected by `rust-toolchain.toml`), Node.js **22.12+**,
+and Bun (tested with **1.4.3**). See [dashboard authentication](AUTH.md).
 Install Rust through [rustup](https://rustup.rs/) if `cargo` is unavailable.
 Run these commands from the repository root; the original root `package.json`
 still belongs to the upstream Node.js implementation.
 
 ```sh
+npm --prefix auth ci
 npm --prefix web ci
 npm --prefix web run build
 node scripts/build-agent-cores.cjs
@@ -81,6 +85,8 @@ Configuration:
 | `MCR_CORE_DIR` | `.local/cores` | Optional per-platform core bundles; absent cores disable remote capabilities |
 | `MCR_WEB_DIR` | `web/dist` | Frontend build directory, relative to the process working directory |
 | `RUST_LOG` | `info` | Rust log filtering |
+| `MCR_BUN` | `bun` | Private dashboard authentication runtime executable |
+| `MCR_AUTH_ENTRY` | Fork's `auth/src/service.ts` | Trusted auth service entry for packaged builds |
 
 Both listeners deliberately remain loopback-only in this development preview.
 The console uses HTTP locally; production HTTPS, secure-cookie deployment,
@@ -97,6 +103,8 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 npm --prefix web run build
+npm --prefix auth run typecheck
+npm --prefix auth test
 npm --prefix web exec -- playwright install chromium
 npm --prefix web run test:e2e
 ```
@@ -151,8 +159,9 @@ The protocol crate has no runtime dependencies. Keep wire parsing independent of
 HTTP, storage, and authentication. The server uses vendored OpenSSL for X.509/RSA
 and rustls for transport; a C compiler, make and Perl are required for a fresh
 vendored OpenSSL build. The new server does not depend on the upstream
-Node.js server at runtime. Node.js is needed to build the frontend and regenerate
-reference fixtures; the built preview is served by a single Rust process.
+Node.js device server at runtime. Rust supervises the private Bun/Better Auth
+dashboard service; Node.js builds the frontend and regenerates fixtures.
+The public API, static assets, device protocol and native TLS relays run in Rust.
 
 ## Fork provenance
 
