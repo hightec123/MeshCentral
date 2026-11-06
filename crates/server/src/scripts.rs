@@ -1,8 +1,9 @@
 use crate::{
-    AppState, DeviceStatus,
+    AppState, Device, DeviceStatus,
+    agent::AgentRuntime,
     console::{ApiFailure, ApiResult, bad, forbidden, operators},
     management::{authorized_device, runtime},
-    operators::{Principal, random_token},
+    operators::{Audit, Principal, random_token},
 };
 use axum::{
     Json, Router,
@@ -12,7 +13,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 const SCRIPT_LIMIT: usize = 4096;
 const OUTPUT_LIMIT: usize = 8192;
@@ -29,12 +30,40 @@ struct Run {
 }
 
 #[derive(Serialize)]
-struct ScriptResult {
+pub(crate) struct ScriptResult {
     id: String,
     status: &'static str,
     exit_code: Option<u8>,
     output: String,
     truncated: bool,
+}
+
+impl ScriptResult {
+    pub(crate) fn outcome(&self) -> &'static str {
+        match self.exit_code {
+            Some(0) => "success",
+            Some(_) => "failed",
+            None => self.status,
+        }
+    }
+
+    pub(crate) fn exit_code(&self) -> Option<u8> {
+        self.exit_code
+    }
+}
+
+pub(crate) fn supports_scripts(device: &Device) -> bool {
+    matches!(device.platform.as_str(), "macOS" | "Linux")
+}
+
+pub(crate) fn validate_script(script: &str) -> ApiResult<String> {
+    let script = script.replace("\r\n", "\n");
+    if script.trim().is_empty() || script.len() > SCRIPT_LIMIT || script.contains(['\0', '\r']) {
+        return Err(bad(
+            "Enter a shell script of 1–4096 UTF-8 bytes without control characters NUL or CR.",
+        ));
+    }
+    Ok(script)
 }
 
 async fn run(
@@ -45,28 +74,40 @@ async fn run(
 ) -> ApiResult<Json<ScriptResult>> {
     let agent = runtime(&state)?;
     let device = authorized_device(&agent, &principal, &node, true)?;
-    if device.status != DeviceStatus::Online
-        || !device.core_ready
-        || !matches!(device.platform.as_str(), "macOS" | "Linux")
-    {
+    let script = validate_script(&body.script)?;
+    let operators = operators(&state)?;
+    if !operators.active(&principal.session_key) {
+        return Err(forbidden());
+    }
+    let work = dispatch(
+        &agent,
+        &device,
+        &script,
+        principal.user.username,
+        operators.audit.clone(),
+    )?;
+    Ok(Json(work.await.map_err(bad)?))
+}
+
+pub(crate) fn dispatch(
+    agent: &AgentRuntime,
+    device: &Device,
+    script: &str,
+    actor: String,
+    audit: Arc<Audit>,
+) -> ApiResult<tokio::task::JoinHandle<ScriptResult>> {
+    if device.status != DeviceStatus::Online || !device.core_ready || !supports_scripts(device) {
         return Err(ApiFailure(
             StatusCode::CONFLICT,
             "Scripts require an online macOS or Linux device with a ready management core.".into(),
         ));
     }
-    let script = body.script.replace("\r\n", "\n");
-    if script.trim().is_empty() || script.len() > SCRIPT_LIMIT || script.contains(['\0', '\r']) {
-        return Err(bad(
-            "Enter a shell script of 1–4096 UTF-8 bytes without control characters NUL or CR.",
-        ));
-    }
-    let operators = operators(&state)?;
-    if !operators.active(&principal.session_key) {
+    let policy = agent.policy.read().unwrap_or_else(|e| e.into_inner());
+    if !policy.permits(&device.group_id, &device.node_id_hex) {
         return Err(forbidden());
     }
+    let node = &device.id;
     let id = random_token().map_err(bad)?;
-    let actor = principal.user.username;
-    let audit = operators.audit.clone();
     let target = format!("{node}/{id}");
     audit
         .record(&actor, "script.run", &target, "requested")
@@ -74,20 +115,21 @@ async fn run(
     let command = json!({
         "action": "runcommands",
         "type": 3,
-        "cmds": shell_command(&script, &id),
+        "cmds": shell_command(script, &id),
         "runAsUser": 0,
         "reply": true,
         "sessionid": id,
         "responseid": id,
     });
     let receiver = agent
-        .start_script(&node, id.clone(), command)
+        .start_script(node, &device.group_id, id.clone(), command)
         .map_err(|error| {
             let _ = audit.record(&actor, "script.run", &target, "not_dispatched");
             ApiFailure(StatusCode::CONFLICT, error.to_string())
         })?;
     // Keep the audit outcome even if the caller navigates away.
-    let work = tokio::spawn(async move {
+    drop(policy);
+    Ok(tokio::spawn(async move {
         let mut result = ScriptResult {
             id,
             status: "unknown",
@@ -100,17 +142,11 @@ async fn run(
             Ok(Err(_)) => result.status = "disconnected",
             Err(_) => result.status = "timed_out",
         }
-        let outcome = match result.exit_code {
-            Some(0) => "success",
-            Some(_) => "failed",
-            None => result.status,
-        };
-        if let Err(error) = audit.record(&actor, "script.run", &target, outcome) {
+        if let Err(error) = audit.record(&actor, "script.run", &target, result.outcome()) {
             tracing::warn!(%error, "could not persist script outcome");
         }
         result
-    });
-    Ok(Json(work.await.map_err(bad)?))
+    }))
 }
 
 fn shell_command(script: &str, id: &str) -> String {

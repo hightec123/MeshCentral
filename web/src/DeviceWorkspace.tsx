@@ -3,6 +3,7 @@ import type { Device } from "./api";
 import { api, useAuth } from "./Auth";
 import { DesktopPanel, FilesPanel, TerminalPanel } from "./RemotePanels";
 import { ScriptPanel } from "./ScriptPanel";
+import { SchedulePanel } from "./SchedulePanel";
 export function DeviceWorkspace({
   device,
   onClose,
@@ -24,6 +25,8 @@ export function DeviceWorkspace({
   const canControl =
     user.role !== "viewer" &&
     (user.role === "administrator" || user.groups.includes(device.group_id));
+  const supportsScripts = ["macOS", "Linux"].includes(device.platform);
+  const canConnect = device.status === "online" && device.core_ready;
   useEffect(() => {
     dialog.current?.showModal();
   }, []);
@@ -70,24 +73,24 @@ export function DeviceWorkspace({
         </button>
       </div>
       <div className="device-tabs" role="tablist" aria-label="Device sections">
-        {["Overview", "Terminal", "Files", "Desktop", "Scripts"].map((name) => (
-          <button
-            key={name}
-            role="tab"
-            aria-selected={tab === name}
-            disabled={
-              name !== "Overview" &&
-              (!canControl ||
-                device.status !== "online" ||
-                !device.core_ready ||
-                (name === "Scripts" &&
-                  !["macOS", "Linux"].includes(device.platform)))
-            }
-            onClick={() => setTab(name)}
-          >
-            {name}
-          </button>
-        ))}
+        {["Overview", "Terminal", "Files", "Desktop", "Scripts", "Tasks"].map(
+          (name) => (
+            <button
+              key={name}
+              role="tab"
+              aria-selected={tab === name}
+              disabled={
+                name !== "Overview" &&
+                (!canControl ||
+                  (name !== "Tasks" && !canConnect) ||
+                  (["Scripts", "Tasks"].includes(name) && !supportsScripts))
+              }
+              onClick={() => setTab(name)}
+            >
+              {name}
+            </button>
+          ),
+        )}
       </div>
       <div className="device-body" role="tabpanel">
         {error && (
@@ -269,6 +272,8 @@ export function DeviceWorkspace({
           <FilesPanel node={device.id} />
         ) : tab === "Scripts" ? (
           <ScriptPanel key={device.id} node={device.id} />
+        ) : tab === "Tasks" ? (
+          <SchedulePanel key={device.id} node={device.id} />
         ) : (
           <DesktopPanel node={device.id} />
         )}

@@ -28,7 +28,8 @@ upstream source alone does not imply support in the Rust server.
 | Intel AMT/CIRA, Wake-on-LAN, power control | Planned |
 | Sharing, consent, session recording, chat and notifications | Planned |
 | Single-device shell scripts | Verified with stock macOS and Linux lab agents; device-group access, bounded output, exit codes and audit history |
-| Scheduled and fleet tasks, TCP/UDP forwarding, routing and WebRTC | Planned |
+| Scheduled shell scripts | One-time and daily single-device tasks verified with stock macOS and Linux lab agents |
+| Fleet tasks, TCP/UDP forwarding, routing and WebRTC | Planned |
 | Encrypted offline backups and restore | Implemented; pinned identity/accounts/metadata retained, live presence/sessions reset, wrong password/tampering/overwrite/active-state refusals tested; see [RECOVERY.md](RECOVERY.md) |
 | Multitenancy, database backends and operational tooling | Planned; scheduled backup/retention and fleet-scale recovery remain outstanding |
 
@@ -39,7 +40,10 @@ Admission supports up to 64 groups and 32 approved agent identities per group;
 the native listener allows 32 sockets and eight concurrent handshakes.
 
 Windows live acceptance is pending a disposable lab VM (none is currently
-available). Next independent implementation targets include scheduled tasks
-and advanced connectivity. Mimesis integration, existing agent trust/database
-migration and production rollout remain separate release gates.
+available). Next independent implementation targets include fleet tasks
+and advanced connectivity. Existing agent trust/database migration and
+production rollout remain separate release gates.
 See [AUTH.md](AUTH.md) for the auth boundary, migration, logout and recovery behavior.
+
+Mimesis integration is the final project phase. It starts after the standalone
+Rust rewrite is complete.

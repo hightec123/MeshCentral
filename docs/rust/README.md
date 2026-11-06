@@ -82,6 +82,21 @@ without a reply the outcome is unknown; the script may still be running.
 Audit history records the actor, device, run ID and outcome. It does not
 store script text or output.
 
+Open a device's **Tasks** tab to schedule a script once or every 24 hours.
+The browser displays times in your local timezone. Each run checks the original
+account's current access and the device's readiness. Signing out leaves a task
+scheduled. Runs over one minute late are marked missed, and offline or busy
+devices skip that occurrence. The task list shows the latest outcome and exit
+code. Completed tasks can be removed to free space in the 32-task preview limit.
+
+Use `GET` or `POST /api/v1/devices/{id}/schedules` to list or create tasks.
+A create request takes `name`, `script`, an RFC 3339 `run_at` timestamp, and
+`repeat` set to `once` or `daily`. Use
+`DELETE /api/v1/devices/{id}/schedules/{task_id}` to cancel or remove a task.
+Creating tasks requires a provisioned Better Auth account with device control.
+Task definitions are stored privately. A server restart does not replay a
+claimed run, and restoring an archive disables pending tasks.
+
 For frontend hot reload, keep the Rust process running and use another terminal:
 
 ```sh

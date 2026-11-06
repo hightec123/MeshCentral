@@ -159,6 +159,12 @@ async fn main() -> Result<()> {
         None
     };
 
+    let scheduler = runtime.clone().map(|agent| {
+        tokio::spawn(meshcentral_server::schedules::worker(
+            operators.clone(),
+            agent,
+        ))
+    });
     let console_handle = axum_server::Handle::new();
     let handle = console_handle.clone();
     let mut console_task = tokio::spawn(async move {
@@ -205,6 +211,10 @@ async fn main() -> Result<()> {
         }
     }
     monitor.abort();
+    if let Some(scheduler) = scheduler {
+        scheduler.abort();
+        let _ = scheduler.await;
+    }
     auth.shutdown().await;
     Ok(())
 }

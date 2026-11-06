@@ -53,17 +53,23 @@ async function main() {
   const passkey = flags.includes("--passkey");
   const emailRecovery = flags.includes("--recovery");
   const scriptRun = flags.includes("--scripts");
+  const schedules = flags.includes("--schedules");
   if (
     flags.some(
       (flag) =>
-        !["--linux", "--mfa", "--passkey", "--recovery", "--scripts"].includes(
-          flag,
-        ),
+        ![
+          "--linux",
+          "--mfa",
+          "--passkey",
+          "--recovery",
+          "--scripts",
+          "--schedules",
+        ].includes(flag),
     ) ||
     (passkey && emailRecovery)
   )
     throw new Error(
-      "Use --linux, --mfa, or --scripts with either --passkey or --recovery.",
+      "Use --linux, --mfa, --scripts, or --schedules with either --passkey or --recovery.",
     );
   const linuxIdentity = linux
     ? JSON.parse(
@@ -73,15 +79,17 @@ async function main() {
   const prefix = linux ? "linux-" : "";
   const evidencePrefix =
     prefix +
-    (scriptRun
-      ? "scripts-"
-      : emailRecovery
-        ? "recovery-"
-        : passkey
-          ? "passkey-"
-          : mfa
-            ? "mfa-"
-            : "");
+    (schedules
+      ? "schedules-"
+      : scriptRun
+        ? "scripts-"
+        : emailRecovery
+          ? "recovery-"
+          : passkey
+            ? "passkey-"
+            : mfa
+              ? "mfa-"
+              : "");
   const credentials = JSON.parse(
     fs.readFileSync(
       path.join(root, ".local/" + prefix + "operator-login.json"),
@@ -131,6 +139,9 @@ async function main() {
   let original, csrf;
   let admin, adminCsrf, operator, totp, recoveryCode;
   let recoveryContext, mailbox;
+  let schedulePath;
+  const scheduleIds = new Set();
+  const scheduleName = "Lab acceptance " + randomUUID().slice(0, 8);
   const result = {};
   const dashboard = page.getByRole("heading", { name: "Devices", exact: true });
   async function signIn(account, factor) {
@@ -376,6 +387,80 @@ async function main() {
     ).json();
     expect(edited.notes).toBe("MCR UI acceptance fixture");
     result.metadata_edit = true;
+    if (schedules) {
+      schedulePath =
+        credentials.url +
+        "/api/v1/devices/" +
+        encodeURIComponent(expected) +
+        "/schedules";
+      const headers = { Origin: credentials.url, "X-CSRF-Token": csrf };
+      await workspace.getByRole("tab", { name: "Tasks", exact: true }).click();
+      await workspace.getByLabel("Task name").fill(scheduleName);
+      const future = new Date(Date.now() + 60 * 60 * 1000);
+      future.setMinutes(future.getMinutes() - future.getTimezoneOffset());
+      await workspace
+        .getByLabel("First run (local time)")
+        .fill(future.toISOString().slice(0, 16));
+      await workspace.getByLabel("Scheduled shell script").fill("exit 8");
+      const created = page.waitForResponse(
+        (response) =>
+          response.url() === schedulePath &&
+          response.request().method() === "POST",
+      );
+      await workspace.getByRole("button", { name: "Schedule script" }).click();
+      const createdResponse = await created;
+      expect(createdResponse.status()).toBe(201);
+      const uiTask = await createdResponse.json();
+      scheduleIds.add(uiTask.id);
+      const article = workspace
+        .getByRole("article")
+        .filter({ hasText: scheduleName });
+      await expect(article).toBeVisible();
+      await article.getByRole("button", { name: "Cancel task" }).click();
+      await expect(article).toHaveCount(0);
+      const firstRun = new Date(Date.now() + 8000);
+      const response = await context.request.post(schedulePath, {
+        headers,
+        data: {
+          name: scheduleName,
+          script: "exit 7",
+          run_at: firstRun.toISOString(),
+          repeat: "daily",
+        },
+      });
+      expect(response.status()).toBe(201);
+      const task = await response.json();
+      scheduleIds.add(task.id);
+      await expect(
+        article.getByText("Failed · exit 7", { exact: false }),
+      ).toBeVisible({ timeout: 25000 });
+      const records = await (await context.request.get(schedulePath)).json();
+      const done = records.find((record) => record.id === task.id);
+      expect(done.last_run).toMatchObject({ status: "failed", exit_code: 7 });
+      expect(Date.parse(done.next_run)).toBe(firstRun.getTime() + 86400000);
+      expect(done).not.toHaveProperty("script");
+      const { events } = await (
+        await context.request.get(credentials.url + "/api/v1/audit")
+      ).json();
+      expect(
+        events.some(
+          (event) =>
+            event.action === "schedule.run" &&
+            event.target === task.id &&
+            event.outcome === "failed",
+        ),
+      ).toBe(true);
+      await article.getByRole("button", { name: "Cancel task" }).click();
+      await expect(article).toHaveCount(0);
+      expect(
+        (await (await context.request.get(schedulePath)).json()).some(
+          (record) => scheduleIds.has(record.id),
+        ),
+      ).toBe(false);
+      result.schedule_create_cancel = true;
+      result.schedule_agent_exit_and_audit = true;
+      result.schedule_daily_advances = true;
+    }
     if (scriptRun) {
       await workspace
         .getByRole("tab", { name: "Scripts", exact: true })
@@ -879,6 +964,14 @@ async function main() {
     );
     console.log(JSON.stringify(result));
   } finally {
+    if (schedulePath && csrf) {
+      for (const id of scheduleIds)
+        await context.request
+          .delete(schedulePath + "/" + encodeURIComponent(id), {
+            headers: { Origin: credentials.url, "X-CSRF-Token": csrf },
+          })
+          .catch(() => {});
+    }
     if (original && csrf)
       await (admin?.request ?? context.request)
         .patch(

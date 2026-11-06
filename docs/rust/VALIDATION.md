@@ -1,5 +1,16 @@
 # Validation evidence
 
+## Scheduled shell scripts
+
+Date: 6 November 2026 (Pacific/Auckland). Both stock ARM64 lab agents ran a
+scheduled script and returned exit code 7. The dashboard displayed the failure,
+the audit contained the matching outcome, and the daily task advanced by 24
+hours. The dashboard created and cancelled a one-time task on each lab.
+Rust tests also passed for scoped access, restart without replay and disabled
+recurrence on restore. The dashboard build and 26 browser regressions passed.
+Local evidence is in the ignored `schedules-management-ui-acceptance.json`
+and `linux-schedules-management-ui-acceptance.json`.
+
 ## Scoped shell scripts
 
 Date: 6 November 2026 (Pacific/Auckland). The dashboard ran a shell script

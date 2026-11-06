@@ -44,6 +44,7 @@ pub struct AgentRuntime {
 }
 
 struct AgentControl {
+    group: String,
     messages: mpsc::Sender<Value>,
     stop: watch::Sender<bool>,
     script: Option<PendingScript>,
@@ -89,12 +90,14 @@ impl AgentRuntime {
     pub(crate) fn start_script(
         &self,
         node: &str,
+        group: &str,
         id: String,
         message: Value,
     ) -> Result<oneshot::Receiver<String>> {
         let mut commands = self.commands.lock().unwrap_or_else(|e| e.into_inner());
         let agent = commands
             .get_mut(node)
+            .filter(|agent| agent.group == group)
             .ok_or_else(|| anyhow::anyhow!("Device is offline."))?;
         ensure!(
             agent.script.is_none(),
@@ -170,6 +173,7 @@ async fn upgrade(
             Err(_) => { tracing::warn!("agent authentication timed out"); let _ = socket.send(Message::Close(None)).await; return; }
         };
         let node_id = peer.node_id.clone();
+        let group = peer.mesh_id_hex.clone();
         let bundle=runtime.cores.for_architecture(peer.architecture);
         let (command_tx,mut command_rx)=mpsc::channel(16);
         let (stop_tx,mut stop_rx)=watch::channel(false);
@@ -177,7 +181,7 @@ async fn upgrade(
             let policy=runtime.policy.read().unwrap_or_else(|e|e.into_inner());
             if !policy.permits(&peer.mesh_id_hex,&peer.node_id_hex){Err(anyhow::anyhow!("admission changed during handshake"))} else {
                 let presence=runtime.registry.connect(peer);
-                if presence.is_ok(){runtime.commands.lock().unwrap_or_else(|e|e.into_inner()).insert(node_id.clone(),AgentControl{messages:command_tx,stop:stop_tx,script:None});}
+                if presence.is_ok(){runtime.commands.lock().unwrap_or_else(|e|e.into_inner()).insert(node_id.clone(),AgentControl{group,messages:command_tx,stop:stop_tx,script:None});}
                 presence
             }
         };

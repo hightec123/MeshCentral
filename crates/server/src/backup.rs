@@ -23,6 +23,7 @@ const FILES: &[&str] = &[
     "inventory.json",
     "operators.json",
     "audit.json",
+    crate::schedules::FILE_NAME,
     "dashboard-auth.json",
     "dashboard-auth.sqlite",
 ];
@@ -268,6 +269,7 @@ pub fn restore(archive: &Path, destination: &Path, password: &str) -> Result<()>
         // A saved online flag must never resurrect a live connection after restore.
         Registry::open(staging.0.join("inventory.json"))?;
     }
+    crate::schedules::Schedules::open(staging.0.join(crate::schedules::FILE_NAME), true)?;
     let operators = Operators::open(&staging.0)?;
     ensure!(
         operators.users().iter().any(|user| user.admin()),

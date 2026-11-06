@@ -490,6 +490,11 @@ async fn group_management_and_device_apis_enforce_scoped_permissions() {
                 "POST",
                 json!({"script":"printf fixture"}),
             ),
+            (
+                "/api/v1/devices/test-device/schedules",
+                "POST",
+                json!({"name":"Fixture","script":"exit 0","run_at":"2027-01-01T00:00:00Z","repeat":"once"}),
+            ),
             ("/api/v1/groups", "POST", json!({"name":"forbidden"})),
         ] {
             assert_eq!(

@@ -135,6 +135,7 @@ pub struct Operators {
     pending_hashes: Arc<Semaphore>,
     dummy_hash: String,
     pub audit: Arc<Audit>,
+    pub(crate) schedules: crate::schedules::Schedules,
     auth: RwLock<Option<Arc<crate::dashboard_auth::DashboardAuth>>>,
 }
 #[derive(Clone)]
@@ -345,6 +346,30 @@ impl Operators {
             .get(username)
             .and_then(|record| record.auth_user_id.clone())
     }
+    pub(crate) fn schedule_owner(&self, principal: &Principal, group: &str) -> Option<String> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let record = inner.accounts.users.get(&principal.user.username)?;
+        if current_principal(&inner, principal) && record.user.can_control(group) {
+            record.auth_user_id.clone()
+        } else {
+            None
+        }
+    }
+    pub(crate) fn with_schedule_access<T>(
+        &self,
+        username: &str,
+        owner_id: &str,
+        group: &str,
+        action: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let record = inner.accounts.users.get(username)?;
+        if record.auth_user_id.as_deref() == Some(owner_id) && record.user.can_control(group) {
+            Some(action())
+        } else {
+            None
+        }
+    }
     pub async fn revalidate_dashboard_sessions(self: &Arc<Self>) {
         use futures_util::{StreamExt, stream};
         let Some(auth) = self.auth() else { return };
@@ -484,6 +509,10 @@ impl Operators {
             pending_hashes: Arc::new(Semaphore::new(10)),
             dummy_hash: hash_password("dummy-not-an-account-password")?,
             audit: Audit::open(directory.join("audit.json"))?,
+            schedules: crate::schedules::Schedules::open(
+                directory.join(crate::schedules::FILE_NAME),
+                false,
+            )?,
             auth: RwLock::new(None),
         }))
     }

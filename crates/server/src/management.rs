@@ -104,11 +104,14 @@ async fn forget(
     }
     let rt = runtime(&s)?;
     authorized_device(&rt, &p, &id, true)?;
-    console::operators(&s)?
-        .audit
-        .record(&p.user.username, "device.forget", &id, "success")
-        .map_err(bad)?;
-    rt.registry.forget(&id).map_err(bad)?;
+    let operators = console::operators(&s)?;
+    operators.schedules.without_device_tasks(&id, || {
+        operators
+            .audit
+            .record(&p.user.username, "device.forget", &id, "success")
+            .map_err(bad)?;
+        rt.registry.forget(&id).map_err(bad)
+    })?;
     Ok(StatusCode::NO_CONTENT)
 }
 async fn disconnect(

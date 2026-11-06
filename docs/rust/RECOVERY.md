@@ -65,6 +65,7 @@ with mode 0700; an existing parent with broader permissions is refused.
 | `inventory.json` | Names, notes, tags and details retained; devices load offline and cores not ready until a fresh authenticated connection |
 | `operators.json` | Roles/group grants and immutable auth user IDs retained; legacy hashes in 0.3.0 archives imported on startup |
 | `audit.json` | Current bounded audit history retained |
+| `schedules.json` | Task definitions retained and future runs disabled |
 | `dashboard-auth.json` / `dashboard-auth.sqlite` | Better Auth signing/service secrets, credentials and identity mappings retained together; all saved sessions revoked on startup |
 
 The versioned JSON archive uses AES-256-GCM with a random 96-bit nonce, 128-bit

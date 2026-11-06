@@ -11,6 +11,7 @@ pub mod management;
 pub mod operators;
 pub mod registry;
 pub mod remote;
+pub mod schedules;
 mod scripts;
 pub mod storage;
 
@@ -211,6 +212,7 @@ pub fn app_with_console_origin(
         .merge(management::routes())
         .merge(remote::routes())
         .merge(scripts::routes())
+        .merge(schedules::routes())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             console::require_operator,
