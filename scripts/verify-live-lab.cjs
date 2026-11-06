@@ -12,15 +12,16 @@ async function main() {
   const flags = process.argv.slice(2);
   const linux = flags.includes("--linux");
   const mfa = flags.includes("--mfa");
-  if (flags.some((flag) => !["--linux", "--mfa"].includes(flag)))
-    throw new Error("Supported flags: --linux and --mfa.");
+  const passkey = flags.includes("--passkey");
+  if (flags.some((flag) => !["--linux", "--mfa", "--passkey"].includes(flag)))
+    throw new Error("Supported flags: --linux, --mfa and --passkey.");
   const linuxIdentity = linux
     ? JSON.parse(
         fs.readFileSync(path.join(root, ".local/linux-agent/identity.json")),
       )
     : null;
   const prefix = linux ? "linux-" : "";
-  const evidencePrefix = prefix + (mfa ? "mfa-" : "");
+  const evidencePrefix = prefix + (passkey ? "passkey-" : mfa ? "mfa-" : "");
   const credentials = JSON.parse(
     fs.readFileSync(
       path.join(root, ".local/" + prefix + "operator-login.json"),
@@ -38,6 +39,8 @@ async function main() {
     (linux ? "http://127.0.0.1:3001" : "http://127.0.0.1:3000")
   )
     throw new Error("This acceptance script only targets the local lab URL.");
+  if (passkey)
+    credentials.url = credentials.url.replace("127.0.0.1", "localhost");
   const scratch = linux
     ? linuxIdentity.remote_scratch
     : path.join(root, ".local/lab-agent/acceptance");
@@ -54,6 +57,13 @@ async function main() {
   });
   const page = await context.newPage();
   const errors = [];
+  const failedPaths = [];
+  page.on("response", (response) => {
+    if (response.status() >= 400)
+      failedPaths.push(
+        `${response.status()} ${new URL(response.url()).pathname}`,
+      );
+  });
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
     if (message.type() === "error") errors.push(message.text());
@@ -89,8 +99,21 @@ async function main() {
     }
     await expect(dashboard).toBeVisible();
   }
+  async function signInWithPasskey() {
+    expect(
+      (await context.request.get(credentials.url + "/api/v1/devices")).status(),
+    ).toBe(401);
+    await page
+      .getByRole("button", { name: "Sign in with a passkey", exact: true })
+      .click();
+    await expect(dashboard).toBeVisible();
+    const session = await (
+      await context.request.get(credentials.url + "/api/v1/auth/session")
+    ).json();
+    expect(session.user.username).toBe(operator.username);
+  }
   try {
-    if (mfa) {
+    if (mfa || passkey) {
       admin = await browser.newContext({ baseURL: credentials.url });
       const headers = { Origin: credentials.url };
       const login = await admin.request.post("/api/v1/auth/login", {
@@ -103,7 +126,8 @@ async function main() {
       expect(login.status()).toBe(200);
       adminCsrf = (await login.json()).csrf;
       const account = {
-        username: "mfa-lab-" + randomUUID().slice(0, 8),
+        username:
+          (passkey ? "passkey-lab-" : "mfa-lab-") + randomUUID().slice(0, 8),
         password: randomBytes(24).toString("base64url"),
       };
       const create = await admin.request.post("/api/v1/users", {
@@ -157,6 +181,35 @@ async function main() {
       await signIn(operator, "totp");
       result.authenticator_sign_in = true;
       result.password_only_inventory_denied = true;
+    }
+    if (passkey) {
+      const cdp = await context.newCDPSession(page);
+      await cdp.send("WebAuthn.enable");
+      await cdp.send("WebAuthn.addVirtualAuthenticator", {
+        options: {
+          protocol: "ctap2",
+          transport: "internal",
+          hasResidentKey: true,
+          hasUserVerification: true,
+          isUserVerified: true,
+        },
+      });
+      await page.getByRole("button", { name: "Account", exact: true }).click();
+      await page
+        .getByLabel("Passkey name")
+        .fill("Disposable lab authenticator");
+      await page
+        .getByLabel("Password for passkey setup")
+        .fill(operator.password);
+      await page
+        .getByRole("button", { name: "Add passkey", exact: true })
+        .click();
+      await expect(
+        page.getByRole("list", { name: "Registered passkeys" }),
+      ).toContainText("Disposable lab authenticator");
+      await page.getByRole("button", { name: "Sign out", exact: true }).click();
+      await signInWithPasskey();
+      result.passkey_sign_in = true;
     }
     const auth = await (
       await context.request.get(credentials.url + "/api/v1/auth/session")
@@ -428,10 +481,10 @@ async function main() {
     });
     await mobileContext.close();
     result.mobile_layout = true;
-    // Keep raw file/desktop sockets outside React's lifecycle so cross-tab UI
+    // Keep raw relay sockets outside React's lifecycle so cross-tab UI
     // cleanup cannot make a missing server-side logout revocation look correct.
     const proofSockets = [];
-    for (const kind of ["files", "desktop"]) {
+    for (const kind of ["terminal", "files", "desktop"]) {
       const response = await context.request.post(
         credentials.url +
           "/api/v1/devices/" +
@@ -454,15 +507,25 @@ async function main() {
                   path,
               );
               window.mcrLogoutProof.sockets.push(ws);
+              const timeout = setTimeout(
+                () =>
+                  reject(new Error("Timed out opening a logout proof relay")),
+                15000,
+              );
               ws.onclose = () => {
                 window.mcrLogoutProof.closed++;
               };
-              ws.onerror = () =>
+              ws.onerror = () => {
+                clearTimeout(timeout);
                 reject(new Error("Logout proof connection failed"));
+              };
               ws.onmessage = (event) => {
                 if (typeof event.data === "string") {
                   try {
-                    if (JSON.parse(event.data).event === "connected") resolve();
+                    if (JSON.parse(event.data).event === "connected") {
+                      clearTimeout(timeout);
+                      resolve();
+                    }
                   } catch {}
                 }
               };
@@ -470,17 +533,6 @@ async function main() {
         ),
       );
     }, proofSockets);
-    await deviceButton.click();
-    const terminalWorkspace = page.getByRole("dialog", { name: original.name });
-    await terminalWorkspace
-      .getByRole("tab", { name: "Terminal", exact: true })
-      .click();
-    await terminalWorkspace
-      .getByRole("button", { name: "Connect", exact: true })
-      .click();
-    await expect(
-      terminalWorkspace.getByText("Connected", { exact: true }),
-    ).toBeVisible();
     const secondTab = await context.newPage();
     await secondTab.goto(credentials.url);
     await expect(
@@ -499,14 +551,19 @@ async function main() {
       .poll(() => page.evaluate(() => window.mcrLogoutProof.closed), {
         timeout: 5000,
       })
-      .toBe(2);
+      .toBe(proofSockets.length);
     expect(
       (await context.request.get(credentials.url + "/api/v1/devices")).status(),
     ).toBe(401);
     await secondTab.close();
     result.logout_closes_native_remote_sessions = true;
-    await signIn(operator ?? credentials, mfa ? "recovery" : undefined);
-    if (mfa) result.recovery_code_sign_in = true;
+    if (passkey) {
+      await signInWithPasskey();
+      result.passkey_sign_in_after_logout = true;
+    } else {
+      await signIn(operator ?? credentials, mfa ? "recovery" : undefined);
+      if (mfa) result.recovery_code_sign_in = true;
+    }
     csrf = (
       await (
         await context.request.get(credentials.url + "/api/v1/auth/session")
@@ -515,7 +572,8 @@ async function main() {
     const remaining = await (
       await context.request.get(credentials.url + "/api/v1/sessions")
     ).json();
-    expect(remaining.sessions).toEqual([]);
+    if (!Array.isArray(remaining.sessions) || remaining.sessions.length)
+      throw new Error("Remote sessions remained after logout.");
     const connected = await (
       await context.request.get(credentials.url + "/api/v1/devices")
     ).json();
@@ -523,7 +581,10 @@ async function main() {
       connected.devices.find((device) => device.id === expected)?.status,
     ).toBe("online");
     result.agent_stays_online_after_logout = true;
-    expect(errors).toEqual([]);
+    if (errors.length)
+      throw new Error(
+        `Browser reported ${errors.length} errors. Failed requests: ${failedPaths.join(", ")}`,
+      );
     fs.writeFileSync(
       path.join(
         root,

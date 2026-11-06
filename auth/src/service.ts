@@ -3,11 +3,13 @@
 import { Database } from "bun:sqlite";
 import { betterAuth, type BetterAuthOptions } from "better-auth";
 import { twoFactor, username } from "better-auth/plugins";
-import { createAuthMiddleware } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { getMigrations } from "better-auth/db/migration";
+import { passkey } from "@better-auth/passkey";
 import { chmodSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 
 process.umask(0o077);
 const directory = process.env.MCR_AUTH_DATA_DIR;
@@ -35,6 +37,13 @@ if (
     !["127.0.0.1", "localhost", "[::1]"].includes(base.hostname))
 )
   throw new Error("An HTTP console must use loopback.");
+const passkeyOrigin = secureConsole
+  ? isIP(base.hostname.replace(/^\[|\]$/g, ""))
+    ? null
+    : origin
+  : `http://localhost${base.port ? ":" + base.port : ""}`;
+const passkeyCookie = "webauthn_challenge";
+const registrationPasswordHeader = "x-mcr-passkey-password";
 const options = {
   appName: "MeshCentral Rust",
   baseURL: origin,
@@ -73,6 +82,34 @@ const options = {
       usernameValidator: (value) => /^[a-zA-Z0-9._-]{3,64}$/.test(value),
     }),
     twoFactor({ twoFactorCookieMaxAge: 300 }),
+    passkey({
+      rpID: passkeyOrigin ? new URL(passkeyOrigin).hostname : "localhost",
+      origin: passkeyOrigin,
+      authenticatorSelection: {
+        residentKey: "required",
+        userVerification: "required",
+      },
+      advanced: { webAuthnChallengeCookie: passkeyCookie },
+      registration: {
+        requireSession: true,
+        async afterVerification({ ctx, user }) {
+          const encoded = ctx.headers?.get(registrationPasswordHeader);
+          const credential =
+            await ctx.context.internalAdapter.findCredentialAccount(user.id);
+          if (
+            !encoded ||
+            !credential?.password ||
+            !(await ctx.context.password.verify({
+              hash: credential.password,
+              password: Buffer.from(encoded, "base64").toString("utf8"),
+            }))
+          )
+            throw new APIError("UNAUTHORIZED", {
+              message: "Current password is incorrect.",
+            });
+        },
+      },
+    }),
   ],
   hooks: {
     before: createAuthMiddleware(async (ctx) => {
@@ -83,7 +120,24 @@ const options = {
         // Require a factor at every sign-in, including for direct API callers.
         return { context: { body: { ...ctx.body, trustDevice: false } } };
       }
-      if (ctx.path === "/sign-out" || ctx.path === "/sign-in/username") {
+      if (ctx.path === "/sign-out") {
+        const cookie = ctx.context.createAuthCookie(passkeyCookie);
+        const challenge = await ctx.getSignedCookie(
+          cookie.name,
+          ctx.context.secret,
+        );
+        if (challenge) {
+          await ctx.context.internalAdapter.deleteVerificationByIdentifier(
+            challenge,
+          );
+          ctx.setCookie(cookie.name, "", { ...cookie.attributes, maxAge: 0 });
+        }
+      }
+      if (
+        ctx.path === "/sign-out" ||
+        ctx.path === "/sign-in/username" ||
+        ctx.path === "/passkey/verify-authentication"
+      ) {
         const cookie = ctx.context.createAuthCookie("two_factor");
         const challenge = await ctx.getSignedCookie(
           cookie.name,
@@ -132,6 +186,16 @@ const deleteChallenges = `DELETE FROM "verification"
 database.exec(`
   DELETE FROM "session";
   DELETE FROM "verification" WHERE "identifier" GLOB '2fa-*';
+  DELETE FROM "verification"
+    WHERE CASE WHEN json_valid("value")
+      THEN json_extract("value", '$.type') IN ('registration', 'authentication')
+      ELSE 0 END;
+  CREATE UNIQUE INDEX IF NOT EXISTS "mcr_passkey_credential" ON "passkey" ("credentialID");
+  CREATE TRIGGER IF NOT EXISTS "mcr_revoke_on_passkey_removal"
+  AFTER DELETE ON "passkey"
+  BEGIN
+    DELETE FROM "session" WHERE "userId" = OLD."userId";
+  END;
   CREATE TRIGGER IF NOT EXISTS "mcr_revoke_on_mfa_change"
   AFTER UPDATE OF "twoFactorEnabled" ON "user"
   WHEN coalesce(OLD."twoFactorEnabled", 0) <> coalesce(NEW."twoFactorEnabled", 0)
@@ -168,6 +232,12 @@ const publicPaths = new Set([
   "two-factor/verify-totp",
   "two-factor/verify-backup-code",
   "two-factor/generate-backup-codes",
+  "passkey/generate-register-options",
+  "passkey/verify-registration",
+  "passkey/generate-authenticate-options",
+  "passkey/verify-authentication",
+  "passkey/list-user-passkeys",
+  "passkey/delete-passkey",
 ]);
 let authWrites = Promise.resolve();
 let pendingWrites = 0;
@@ -329,12 +399,66 @@ const server = Bun.serve({
       const path = url.pathname.replace(/^\/api\/auth\//, "");
       if (!url.pathname.startsWith("/api/auth/") || !publicPaths.has(path))
         return response({}, 404);
+      if (path.startsWith("passkey/")) {
+        if (
+          !passkeyOrigin ||
+          request.headers.get("host") !== new URL(passkeyOrigin).host
+        )
+          return response(
+            { error: "Passkeys require the configured console hostname." },
+            403,
+          );
+        const suppliedOrigin = request.headers.get("origin");
+        if (
+          (request.method === "POST" || suppliedOrigin) &&
+          suppliedOrigin !== passkeyOrigin
+        )
+          return response({ error: "Incorrect passkey origin." }, 403);
+      }
       const handle = async () => {
-        const result = await auth.handler(request);
+        let input = request;
+        if (
+          path === "passkey/verify-registration" &&
+          request.method === "POST"
+        ) {
+          const {
+            password,
+            name,
+            response: attestation,
+          } = await request.json();
+          if (
+            typeof password !== "string" ||
+            password.length > 128 ||
+            !password
+          )
+            return response({ error: "Current password is required." }, 400);
+          if (typeof name !== "string" || !name.trim() || name.length > 64)
+            return response(
+              { error: "Enter a name of up to 64 characters." },
+              400,
+            );
+          // Keep the password in the incoming JSON and only attach it to the
+          // private in-process request for the verified registration hook.
+          const headers = new Headers(request.headers);
+          headers.delete("content-length");
+          headers.set(
+            registrationPasswordHeader,
+            Buffer.from(password).toString("base64"),
+          );
+          input = new Request(request.url, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ name: name.trim(), response: attestation }),
+          });
+        }
+        const result = await auth.handler(input);
         result.headers.set("Cache-Control", "no-store");
         return result;
       };
-      return await (request.method === "POST" ? authWrite(handle) : handle());
+      return await (request.method === "POST" ||
+      path.startsWith("passkey/generate-")
+        ? authWrite(handle)
+        : handle());
     } catch {
       return response({ error: "Authentication operation failed" }, 400);
     }

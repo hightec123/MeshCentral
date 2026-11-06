@@ -49,6 +49,24 @@ The password step grants a five-minute challenge. Rust grants device access
 after the second factor establishes a dashboard session. Trusted-device
 exceptions are disabled.
 
+## Sign in with a passkey
+
+1. Open the console on its HTTPS hostname. For the local labs, use
+   `http://localhost:3000` on macOS or `http://localhost:3001` on Linux.
+2. Sign in and open **Account → Passkeys**. Give the passkey a name, enter your
+   current password, and select **Add passkey**.
+3. Verify with your device or security key. At the login screen, select
+   **Sign in with a passkey** to use it.
+
+WebAuthn verifies the configured origin and relying party hostname. Registration
+and sign-in require user verification on the authenticator, such as a fingerprint
+or PIN. Passkey sign-in works without entering a password. Password sign-in
+still requires the account's second factor when MFA is enabled.
+
+Removing a passkey revokes every dashboard sign-in for that account and closes
+the remote sessions they own. Keep access to your password and, if enrolled in
+MFA, an authenticator or recovery code so you can sign in if you lose a device.
+
 ## Serve the console over HTTPS
 
 Supply a PEM certificate chain and matching private key for the exact origin
@@ -139,7 +157,7 @@ No database, credential or signing secret is committed.
 | --- | --- |
 | `operators.json` | Rust roles/group grants and immutable Better Auth user IDs |
 | `dashboard-auth.json` | Signing/service secrets and a per-instance cookie prefix |
-| `dashboard-auth.sqlite` | Better Auth users, credential hashes, sessions, and encrypted authenticator secrets and recovery codes |
+| `dashboard-auth.sqlite` | Better Auth users, credential hashes, sessions, passkey public keys, and encrypted authenticator secrets and recovery codes |
 
 The encrypted [backup/restore workflow](RECOVERY.md) includes both auth files and
 keeps the original credentials/mappings. Database backups require a stopped server

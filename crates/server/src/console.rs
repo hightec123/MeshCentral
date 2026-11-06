@@ -364,23 +364,7 @@ async fn proxy(
     headers: &HeaderMap,
     mut body: Vec<u8>,
 ) -> ApiResult<Response> {
-    if ![
-        "sign-in/username",
-        "sign-out",
-        "get-session",
-        "change-password",
-        "list-sessions",
-        "revoke-session",
-        "revoke-sessions",
-        "revoke-other-sessions",
-        "two-factor/enable",
-        "two-factor/disable",
-        "two-factor/verify-totp",
-        "two-factor/verify-backup-code",
-        "two-factor/generate-backup-codes",
-    ]
-    .contains(&path)
-    {
+    if !crate::dashboard_auth::allowed_path(path) {
         return Err(ApiFailure(
             StatusCode::NOT_FOUND,
             "Unknown authentication endpoint.".into(),
@@ -399,6 +383,19 @@ async fn proxy(
         path,
         "two-factor/verify-totp" | "two-factor/verify-backup-code"
     );
+    let passkey_settings = matches!(
+        path,
+        "passkey/generate-register-options"
+            | "passkey/verify-registration"
+            | "passkey/list-user-passkeys"
+            | "passkey/delete-passkey"
+    );
+    let passkey_get = matches!(
+        path,
+        "passkey/generate-register-options"
+            | "passkey/generate-authenticate-options"
+            | "passkey/list-user-passkeys"
+    );
     let mutation = [
         "sign-out",
         "change-password",
@@ -409,10 +406,11 @@ async fn proxy(
     .contains(&path);
     if !["GET", "POST"].contains(&method)
         || ((mutation || mfa_settings || mfa_verify) && method != "POST")
+        || (path.starts_with("passkey/") && passkey_get != (method == "GET"))
     {
         return Err(bad("Unsupported auth method."));
     }
-    let principal = if mfa_settings || mfa_verify {
+    let principal = if mfa_settings || mfa_verify || passkey_settings {
         store
             .dashboard_principal(cookie(headers))
             .await
@@ -427,7 +425,7 @@ async fn proxy(
     } else {
         None
     };
-    if mfa_settings && principal.is_none() {
+    if (mfa_settings || passkey_settings) && principal.is_none() {
         return Err(unauthorized());
     }
     if path == "sign-out"
@@ -449,11 +447,27 @@ async fn proxy(
             .insert("revokeOtherSessions".into(), true.into());
         body = serde_json::to_vec(&value).map_err(bad)?;
     }
-    let reply = auth
+    let mut reply = auth
         .request(path, method, headers, body.clone())
         .await
         .map_err(|_| auth_unavailable())?;
-    if reply.status.is_success() && (mutation || mfa_settings || mfa_verify) {
+    if reply.status.is_success() && path == "passkey/verify-authentication" {
+        let principal = store
+            .dashboard_principal(&reply_cookie(&reply))
+            .await
+            .map_err(|_| auth_unavailable())?
+            .ok_or_else(forbidden)?;
+        let _ = store.audit.record(
+            &principal.user.username,
+            "account.passkey.login",
+            "",
+            "success",
+        );
+        // Better Auth includes a session token in the JSON result. The browser
+        // only needs the HttpOnly cookie and Rust's permission view.
+        reply.body = br#"{"ok":true}"#.to_vec();
+    }
+    if reply.status.is_success() && (mutation || mfa_settings || mfa_verify || passkey_settings) {
         if path == "change-password"
             && let Some(p) = &principal
         {
@@ -474,7 +488,7 @@ async fn proxy(
             || (path == "two-factor/verify-totp"
                 && principal.is_some()
                 && reply.headers.contains_key(header::SET_COOKIE));
-        if mutation || rotated_mfa_session {
+        if mutation || rotated_mfa_session || path == "passkey/delete-passkey" {
             store.revalidate_dashboard_sessions().await;
             if let Some(rt) = &state.runtime {
                 rt.relays.close_inactive(&store);
@@ -483,6 +497,8 @@ async fn proxy(
         let action = match path {
             "two-factor/disable" => Some("account.mfa.disable"),
             "two-factor/generate-backup-codes" => Some("account.mfa.recovery-codes"),
+            "passkey/verify-registration" => Some("account.passkey.add"),
+            "passkey/delete-passkey" => Some("account.passkey.remove"),
             "two-factor/verify-totp" if !reply_cookie(&reply).is_empty() => {
                 Some("account.mfa.verify")
             }

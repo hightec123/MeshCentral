@@ -251,6 +251,21 @@ async fn validate_authority(
     mut request: Request,
     next: Next,
 ) -> axum::response::Response {
+    // HTTP/2 clients can split cookies across fields. Reassemble them before
+    // session checks or proxying a WebAuthn challenge to Better Auth.
+    let cookies = request.headers().get_all(header::COOKIE);
+    if cookies.iter().nth(1).is_some() {
+        let bytes = cookies
+            .iter()
+            .map(HeaderValue::as_bytes)
+            .collect::<Vec<_>>()
+            .join(b"; ".as_slice());
+        let Ok(mut cookie) = HeaderValue::from_bytes(&bytes) else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        cookie.set_sensitive(true);
+        request.headers_mut().insert(header::COOKIE, cookie);
+    }
     if let Some(origin) = console_origin {
         let authority = origin.authority().expect("configured console authority");
         let target = request.uri().authority();

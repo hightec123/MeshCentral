@@ -6,7 +6,11 @@ import {
   useState,
 } from "react";
 import type { ReactNode, FormEvent } from "react";
-import { authClient } from "./auth-client";
+import {
+  authClient,
+  localhostPasskeyUrl,
+  passkeysAvailable,
+} from "./auth-client";
 export type Operator = {
   username: string;
   role: "administrator" | "operator" | "viewer";
@@ -51,6 +55,7 @@ export async function api<T = Record<string, unknown>>(
   return (response.status === 204 ? undefined : await response.json()) as T;
 }
 export function AuthGate({ children }: { children: ReactNode }) {
+  const localPasskeyUrl = localhostPasskeyUrl();
   const [auth, setAuth] = useState<{ user: Operator; csrf: string } | null>(
     null,
   );
@@ -189,6 +194,24 @@ export function AuthGate({ children }: { children: ReactNode }) {
       setBusy(false);
     }
   }
+  async function signInWithPasskey() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await authClient.signIn.passkey();
+      if (result.error || !(await readSession()))
+        throw new Error(
+          "Passkey sign-in failed. Try again or sign in with your password.",
+        );
+      setPassword("");
+    } catch (error) {
+      setError(
+        error instanceof Error ? error.message : "Passkey sign-in failed.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
   if (loading)
     return (
       <div className="auth-shell">
@@ -296,6 +319,19 @@ export function AuthGate({ children }: { children: ReactNode }) {
             <button className="button primary" disabled={busy}>
               {busy ? "Signing in…" : "Sign in"}
             </button>
+            {passkeysAvailable() && (
+              <button
+                className="button"
+                type="button"
+                disabled={busy}
+                onClick={() => void signInWithPasskey()}
+              >
+                Sign in with a passkey
+              </button>
+            )}
+            {localPasskeyUrl && (
+              <a href={localPasskeyUrl}>Open localhost to use a passkey</a>
+            )}
           </form>
         )}
         <small>Your session is private to this browser.</small>

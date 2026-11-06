@@ -24,6 +24,11 @@ using an authenticator code and a recovery code, and removes the account after
 checking remote-session logout. Existing operators enroll their own authenticators
 from **Account**. The run writes `.local/evidence/mfa-management-ui-acceptance.json`.
 
+Run `node scripts/verify-live-lab.cjs --mfa --passkey` to add WebAuthn
+acceptance on `http://localhost:3000`. It uses a Chromium virtual authenticator
+and checks that logout closes all three relay types established after passkey
+sign-in. Add `--linux` for the Linux lab.
+
 After stopping these processes, start them again in separate terminals from the
 repository root:
 

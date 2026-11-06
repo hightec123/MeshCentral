@@ -50,6 +50,31 @@ pub struct Reply {
     pub body: Vec<u8>,
 }
 
+pub(crate) fn allowed_path(path: &str) -> bool {
+    matches!(
+        path,
+        "sign-in/username"
+            | "sign-out"
+            | "get-session"
+            | "change-password"
+            | "list-sessions"
+            | "revoke-session"
+            | "revoke-sessions"
+            | "revoke-other-sessions"
+            | "two-factor/enable"
+            | "two-factor/disable"
+            | "two-factor/verify-totp"
+            | "two-factor/verify-backup-code"
+            | "two-factor/generate-backup-codes"
+            | "passkey/generate-register-options"
+            | "passkey/verify-registration"
+            | "passkey/generate-authenticate-options"
+            | "passkey/verify-authentication"
+            | "passkey/list-user-passkeys"
+            | "passkey/delete-passkey"
+    )
+}
+
 impl AuthProcess {
     pub async fn start(directory: &Path, origin: &str, operators: &Arc<Operators>) -> Result<Self> {
         let directory = std::fs::canonicalize(directory)?;
@@ -198,23 +223,8 @@ impl DashboardAuth {
         headers: &HeaderMap,
         body: Vec<u8>,
     ) -> Result<Reply> {
-        let allowed = [
-            "sign-in/username",
-            "sign-out",
-            "get-session",
-            "change-password",
-            "list-sessions",
-            "revoke-session",
-            "revoke-sessions",
-            "revoke-other-sessions",
-            "two-factor/enable",
-            "two-factor/disable",
-            "two-factor/verify-totp",
-            "two-factor/verify-backup-code",
-            "two-factor/generate-backup-codes",
-        ];
         ensure!(
-            allowed.contains(&path),
+            allowed_path(path),
             "unsupported dashboard authentication endpoint"
         );
         let mut request = self

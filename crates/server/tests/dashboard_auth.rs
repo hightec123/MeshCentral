@@ -68,6 +68,17 @@ async fn external_authentication_fails_closed_without_falling_back_to_legacy_coo
         .unwrap()
         .unwrap();
     assert!(operators.active(&principal.session_key));
+    let split_cookies = Request::builder()
+        .uri("/api/v1/devices")
+        .header("host", "127.0.0.1:3300")
+        .header("cookie", "other=fixture")
+        .header("cookie", &cookie)
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.clone().oneshot(split_cookies).await.unwrap().status(),
+        200
+    );
     let invalid = Request::builder()
         .method("POST")
         .uri("/api/auth/change-password")
