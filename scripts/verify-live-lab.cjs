@@ -53,7 +53,8 @@ async function main() {
   const passkey = flags.includes("--passkey");
   const emailRecovery = flags.includes("--recovery");
   const scriptRun = flags.includes("--scripts");
-  const schedules = flags.includes("--schedules");
+  const fleet = flags.includes("--fleet");
+  const schedules = fleet || flags.includes("--schedules");
   if (
     flags.some(
       (flag) =>
@@ -64,6 +65,7 @@ async function main() {
           "--recovery",
           "--scripts",
           "--schedules",
+          "--fleet",
         ].includes(flag),
     ) ||
     (passkey && emailRecovery)
@@ -79,17 +81,19 @@ async function main() {
   const prefix = linux ? "linux-" : "";
   const evidencePrefix =
     prefix +
-    (schedules
-      ? "schedules-"
-      : scriptRun
-        ? "scripts-"
-        : emailRecovery
-          ? "recovery-"
-          : passkey
-            ? "passkey-"
-            : mfa
-              ? "mfa-"
-              : "");
+    (fleet
+      ? "fleet-"
+      : schedules
+        ? "schedules-"
+        : scriptRun
+          ? "scripts-"
+          : emailRecovery
+            ? "recovery-"
+            : passkey
+              ? "passkey-"
+              : mfa
+                ? "mfa-"
+                : "");
   const credentials = JSON.parse(
     fs.readFileSync(
       path.join(root, ".local/" + prefix + "operator-login.json"),
@@ -140,7 +144,7 @@ async function main() {
   let admin, adminCsrf, operator, totp, recoveryCode;
   let recoveryContext, mailbox;
   let schedulePath;
-  const scheduleIds = new Set();
+  const scheduleIds = new Map();
   const scheduleName = "Lab acceptance " + randomUUID().slice(0, 8);
   const result = {};
   const dashboard = page.getByRole("heading", { name: "Devices", exact: true });
@@ -394,6 +398,57 @@ async function main() {
         encodeURIComponent(expected) +
         "/schedules";
       const headers = { Origin: credentials.url, "X-CSRF-Token": csrf };
+      if (fleet) {
+        const fleetPath = credentials.url + "/api/v1/schedules";
+        await workspace.getByRole("button", { name: "Close device" }).click();
+        await page
+          .getByRole("navigation", { name: "Main navigation" })
+          .getByRole("button", { name: "Tasks", exact: true })
+          .click();
+        const tasksPage = page.getByRole("main");
+        await tasksPage
+          .getByRole("checkbox", {
+            name: [
+              original.name,
+              original.group,
+              "online",
+              expected.slice(-8),
+            ].join(" · "),
+            exact: true,
+          })
+          .check();
+        await tasksPage.getByLabel("Task name").fill(scheduleName);
+        const next = new Date(Date.now() + 60 * 60 * 1000);
+        next.setMinutes(next.getMinutes() - next.getTimezoneOffset());
+        await tasksPage
+          .getByLabel("First run (local time)")
+          .fill(next.toISOString().slice(0, 16));
+        await tasksPage.getByLabel("Scheduled shell script").fill("exit 8");
+        const response = page.waitForResponse(
+          (entry) =>
+            entry.url() === fleetPath && entry.request().method() === "POST",
+        );
+        await tasksPage
+          .getByRole("button", { name: "Schedule script" })
+          .click();
+        const created = await response;
+        expect(created.status()).toBe(201);
+        const [task] = await created.json();
+        scheduleIds.set(task.id, expected);
+        expect(task.device_id).toBe(expected);
+        const scheduled = tasksPage
+          .getByRole("article")
+          .filter({ hasText: scheduleName });
+        await expect(scheduled).toContainText(original.name);
+        await scheduled.getByRole("button", { name: "Cancel task" }).click();
+        await expect(scheduled).toHaveCount(0);
+        await page
+          .getByRole("navigation", { name: "Main navigation" })
+          .getByRole("button", { name: "Devices", exact: true })
+          .click();
+        await deviceButton.click();
+        result.fleet_picker_and_cancel = true;
+      }
       await workspace.getByRole("tab", { name: "Tasks", exact: true }).click();
       await workspace.getByLabel("Task name").fill(scheduleName);
       const future = new Date(Date.now() + 60 * 60 * 1000);
@@ -411,7 +466,7 @@ async function main() {
       const createdResponse = await created;
       expect(createdResponse.status()).toBe(201);
       const uiTask = await createdResponse.json();
-      scheduleIds.add(uiTask.id);
+      scheduleIds.set(uiTask.id, expected);
       const article = workspace
         .getByRole("article")
         .filter({ hasText: scheduleName });
@@ -419,18 +474,58 @@ async function main() {
       await article.getByRole("button", { name: "Cancel task" }).click();
       await expect(article).toHaveCount(0);
       const firstRun = new Date(Date.now() + 8000);
-      const response = await context.request.post(schedulePath, {
-        headers,
-        data: {
-          name: scheduleName,
-          script: "exit 7",
-          run_at: firstRun.toISOString(),
-          repeat: "daily",
-        },
-      });
+      const body = {
+        name: scheduleName,
+        script: "exit 7",
+        run_at: firstRun.toISOString(),
+        repeat: "daily",
+      };
+      const offline =
+        fleet && linux
+          ? inventory.devices.find(
+              (device) =>
+                device.id !== expected &&
+                device.group === "Rust lab" &&
+                device.platform === "Linux" &&
+                device.status === "offline",
+            )
+          : null;
+      if (fleet && linux) expect(offline).toBeTruthy();
+      const targets = offline ? [expected, offline.id] : [expected];
+      const response = await context.request.post(
+        fleet ? credentials.url + "/api/v1/schedules" : schedulePath,
+        { headers, data: fleet ? { devices: targets, task: body } : body },
+      );
       expect(response.status()).toBe(201);
-      const task = await response.json();
-      scheduleIds.add(task.id);
+      const data = await response.json();
+      const task = fleet ? data[0] : data;
+      scheduleIds.set(task.id, expected);
+      if (offline) {
+        const other = data.find((entry) => entry.device_id === offline.id);
+        expect(other).toBeTruthy();
+        scheduleIds.set(other.id, offline.id);
+        const fleetPath = credentials.url + "/api/v1/schedules";
+        await expect
+          .poll(
+            async () => {
+              const all = await (await context.request.get(fleetPath)).json();
+              return all.find((entry) => entry.id === other.id)?.last_run
+                ?.status;
+            },
+            { timeout: 20000 },
+          )
+          .toBe("device_unavailable");
+        const offlinePath =
+          credentials.url +
+          "/api/v1/devices/" +
+          encodeURIComponent(offline.id) +
+          "/schedules/" +
+          other.id;
+        expect(
+          (await context.request.delete(offlinePath, { headers })).status(),
+        ).toBe(204);
+        result.fleet_independent_offline_outcome = true;
+      }
       await expect(
         article.getByText("Failed · exit 7", { exact: false }),
       ).toBeVisible({ timeout: 25000 });
@@ -965,11 +1060,18 @@ async function main() {
     console.log(JSON.stringify(result));
   } finally {
     if (schedulePath && csrf) {
-      for (const id of scheduleIds)
+      for (const [id, device] of scheduleIds)
         await context.request
-          .delete(schedulePath + "/" + encodeURIComponent(id), {
-            headers: { Origin: credentials.url, "X-CSRF-Token": csrf },
-          })
+          .delete(
+            credentials.url +
+              "/api/v1/devices/" +
+              encodeURIComponent(device) +
+              "/schedules/" +
+              encodeURIComponent(id),
+            {
+              headers: { Origin: credentials.url, "X-CSRF-Token": csrf },
+            },
+          )
           .catch(() => {});
     }
     if (original && csrf)

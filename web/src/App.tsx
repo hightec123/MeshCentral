@@ -8,6 +8,7 @@ const DeviceWorkspace = lazy(() =>
   })),
 );
 import { ManagementPage } from "./ManagementPage";
+import { SchedulePanel } from "./SchedulePanel";
 
 export default function App() {
   return (
@@ -77,7 +78,7 @@ function Workspace() {
             "Devices",
             "Groups",
             ...(user.role === "administrator" ? ["People", "Activity"] : []),
-            ...(user.role !== "viewer" ? ["Sessions"] : []),
+            ...(user.role !== "viewer" ? ["Sessions", "Tasks"] : []),
             "Account",
           ].map((name) => (
             <button
@@ -360,6 +361,18 @@ function Workspace() {
                   ? "Select a device to view its information or start an authorised remote session."
                   : "Remote connections become available after the approved agent’s management core is ready."}
               </p>
+            </>
+          ) : section === "Tasks" && user.role !== "viewer" ? (
+            <>
+              <div className="page-heading">
+                <div><h1>Tasks</h1><p>Schedule a shell script on selected devices.</p></div>
+              </div>
+              <section className="group-card">
+                <SchedulePanel devices={devices.filter((device) =>
+                  ["macOS", "Linux"].includes(device.platform) &&
+                  (user.role === "administrator" || user.groups.includes(device.group_id))
+                )} />
+              </section>
             </>
           ) : (
             <ManagementPage key={section} section={section} />

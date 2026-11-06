@@ -1,8 +1,10 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api, useAuth } from "./Auth";
+import type { Device } from "./api";
 
 type Schedule = {
   id: string;
+  device_id?: string;
   name: string;
   owner: string;
   repeat: "once" | "daily";
@@ -29,9 +31,17 @@ const outcomes: Record<string, string> = {
   restored_inactive: "Disabled on restore",
 };
 
-export function SchedulePanel({ node }: { node: string }) {
+export function SchedulePanel({
+  node,
+  devices = [],
+}: {
+  node?: string;
+  devices?: Device[];
+}) {
   const { csrf } = useAuth();
-  const path = "/devices/" + encodeURIComponent(node) + "/schedules";
+  const devicePath = (id: string) =>
+    "/devices/" + encodeURIComponent(id) + "/schedules";
+  const path = node ? devicePath(node) : "/schedules";
   const [tasks, setTasks] = useState<Schedule[]>();
   const [name, setName] = useState("");
   const [script, setScript] = useState("");
@@ -40,6 +50,10 @@ export function SchedulePanel({ node }: { node: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [loadError, setLoadError] = useState("");
+  const [selected, setSelected] = useState<string[]>([]);
+  const targets = selected.filter((id) =>
+    devices.some((device) => device.id === id),
+  );
 
   useEffect(() => {
     if (busy) return;
@@ -75,16 +89,23 @@ export function SchedulePanel({ node }: { node: string }) {
     setBusy(true);
     setError("");
     try {
-      const task = await api<Schedule>(path, csrf, "POST", {
+      const input = {
         name,
         script,
         run_at: date.toISOString(),
         repeat,
-      });
-      setTasks((current) => [...(current ?? []), task]);
+      };
+      const created = node
+        ? [await api<Schedule>(path, csrf, "POST", input)]
+        : await api<Schedule[]>(path, csrf, "POST", {
+            devices: targets,
+            task: input,
+          });
+      setTasks((current) => [...(current ?? []), ...created]);
       setName("");
       setScript("");
       setRunAt("");
+      setSelected([]);
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -93,10 +114,16 @@ export function SchedulePanel({ node }: { node: string }) {
   }
 
   async function remove(task: Schedule) {
+    const target = task.device_id ?? node;
+    if (!target) return;
     setBusy(true);
     setError("");
     try {
-      await api(path + "/" + encodeURIComponent(task.id), csrf, "DELETE");
+      await api(
+        devicePath(target) + "/" + encodeURIComponent(task.id),
+        csrf,
+        "DELETE",
+      );
       setTasks((current) => current?.filter((entry) => entry.id !== task.id));
     } catch (cause) {
       setError(String(cause));
@@ -109,7 +136,7 @@ export function SchedulePanel({ node }: { node: string }) {
   const bytes = new TextEncoder().encode(script).length;
 
   return (
-    <section className="system-details">
+    <section className="system-details schedule-panel">
       <h3>Scheduled tasks</h3>
       <p className="panel-help">
         Scripts run as the agent account. The device must be online when the
@@ -117,6 +144,37 @@ export function SchedulePanel({ node }: { node: string }) {
       </p>
       <form onSubmit={(event) => void save(event)}>
         <fieldset disabled={busy}>
+          {!node && (
+            <fieldset className="schedule-targets">
+              <legend>Choose up to eight devices</legend>
+              {devices.length === 0 && (
+                <p>No supported devices in your scope.</p>
+              )}
+              {devices.map((device) => (
+                <label key={device.id}>
+                  <span>
+                    <input
+                      type="checkbox"
+                      checked={targets.includes(device.id)}
+                      disabled={
+                        targets.length >= 8 && !targets.includes(device.id)
+                      }
+                      onChange={(event) => {
+                        const checked = event.target.checked;
+                        setSelected(
+                          checked
+                            ? [...targets, device.id]
+                            : targets.filter((id) => id !== device.id),
+                        );
+                      }}
+                    />{" "}
+                    {device.name} · {device.group} · {device.status} ·{" "}
+                    {device.id.slice(-8)}
+                  </span>
+                </label>
+              ))}
+            </fieldset>
+          )}
           <label className="field-label">
             Task name
             <input
@@ -159,7 +217,12 @@ export function SchedulePanel({ node }: { node: string }) {
           <p className="panel-help">{bytes} / 4096 bytes</p>
           <button
             className="button primary"
-            disabled={!name.trim() || !script.trim() || bytes > 4096}
+            disabled={
+              !name.trim() ||
+              !script.trim() ||
+              bytes > 4096 ||
+              (!node && targets.length === 0)
+            }
           >
             Schedule script
           </button>
@@ -177,10 +240,17 @@ export function SchedulePanel({ node }: { node: string }) {
         </p>
       )}
       {!tasks && !loadError && <p>Loading tasks…</p>}
-      {tasks?.length === 0 && <p>No scheduled tasks for this device.</p>}
+      {tasks?.length === 0 && <p>No scheduled tasks.</p>}
       {tasks?.map((task) => (
         <article key={task.id}>
           <h4>{task.name}</h4>
+          {task.device_id && (
+            <p>
+              {devices.find((device) => device.id === task.device_id)?.name ??
+                "Device"}{" "}
+              · {task.device_id.slice(-8)}
+            </p>
+          )}
           <p>
             {task.owner} · {task.repeat === "daily" ? "Every 24 hours" : "Once"}
           </p>

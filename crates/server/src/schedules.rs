@@ -24,6 +24,7 @@ use tokio::task::JoinSet;
 
 pub(crate) const FILE_NAME: &str = "schedules.json";
 const CAPACITY: usize = 32;
+const BATCH_LIMIT: usize = 8;
 const GRACE_SECONDS: i64 = 60;
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -66,6 +67,20 @@ struct Create {
     script: String,
     run_at: DateTime<Utc>,
     repeat: Repeat,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateBatch {
+    devices: Vec<String>,
+    task: Create,
+}
+
+#[derive(Serialize)]
+struct DeviceSchedule {
+    device_id: String,
+    #[serde(flatten)]
+    task: Schedule,
 }
 
 pub(crate) struct Schedules {
@@ -189,6 +204,7 @@ fn running(task: &Schedule) -> bool {
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
+        .route("/v1/schedules", get(list_all).post(create_batch))
         .route("/v1/devices/{node}/schedules", get(list).post(create))
         .route("/v1/devices/{node}/schedules/{id}", delete(remove))
 }
@@ -212,17 +228,46 @@ async fn list(
     Ok(Json(
         entries
             .iter()
-            .filter(|entry| visible(entry, &node, &p, owner_id.as_deref()))
+            .filter(|entry| entry.node == node && visible(entry, &p, owner_id.as_deref()))
             .map(|entry| entry.schedule.clone())
             .collect(),
     ))
 }
 
-fn visible(entry: &Entry, node: &str, p: &Principal, owner_id: Option<&str>) -> bool {
-    entry.node == node
-        && (p.user.admin()
-            || (entry.schedule.owner == p.user.username
-                && Some(entry.owner_id.as_str()) == owner_id))
+fn visible(entry: &Entry, p: &Principal, owner_id: Option<&str>) -> bool {
+    p.user.admin()
+        || (entry.schedule.owner == p.user.username && Some(entry.owner_id.as_str()) == owner_id)
+}
+
+async fn list_all(
+    State(state): State<AppState>,
+    Extension(p): Extension<Principal>,
+) -> ApiResult<Json<Vec<DeviceSchedule>>> {
+    let operators = operators(&state)?;
+    let owner_id = operators.auth_user_id(&p.user.username);
+    let entries = operators
+        .schedules
+        .entries
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    Ok(Json(
+        entries
+            .iter()
+            .filter(|entry| {
+                visible(entry, &p, owner_id.as_deref())
+                    && (p.user.admin()
+                        || state
+                            .runtime
+                            .as_ref()
+                            .and_then(|agent| agent.registry.device(&entry.node))
+                            .is_some_and(|device| p.user.can_control(&device.group_id)))
+            })
+            .map(|entry| DeviceSchedule {
+                device_id: entry.node.clone(),
+                task: entry.schedule.clone(),
+            })
+            .collect(),
+    ))
 }
 
 async fn create(
@@ -231,11 +276,38 @@ async fn create(
     Path(node): Path<String>,
     Json(body): Json<Create>,
 ) -> ApiResult<(StatusCode, Json<Schedule>)> {
-    let agent = runtime(&state)?;
-    let device = authorized_device(&agent, &p, &node, true)?;
-    if !scripts::supports_scripts(&device) {
-        return Err(bad("Scheduling requires a macOS or Linux device."));
+    let mut tasks = schedule(&state, &p, vec![node], body)?;
+    Ok((StatusCode::CREATED, Json(tasks.remove(0).task)))
+}
+
+async fn create_batch(
+    State(state): State<AppState>,
+    Extension(p): Extension<Principal>,
+    Json(body): Json<CreateBatch>,
+) -> ApiResult<(StatusCode, Json<Vec<DeviceSchedule>>)> {
+    Ok((
+        StatusCode::CREATED,
+        Json(schedule(&state, &p, body.devices, body.task)?),
+    ))
+}
+
+fn schedule(
+    state: &AppState,
+    p: &Principal,
+    nodes: Vec<String>,
+    body: Create,
+) -> ApiResult<Vec<DeviceSchedule>> {
+    if nodes.is_empty()
+        || nodes.len() > BATCH_LIMIT
+        || nodes
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != nodes.len()
+    {
+        return Err(bad("Select one to eight distinct devices."));
     }
+    let agent = runtime(state)?;
     let name = body.name.trim();
     if name.is_empty() || name.len() > 80 || name.chars().any(char::is_control) {
         return Err(bad("Enter a task name of 1–80 UTF-8 bytes."));
@@ -245,50 +317,73 @@ async fn create(
         return Err(bad("Schedule a time in the next 366 days."));
     }
     let script = scripts::validate_script(&body.script)?;
-    let operators = operators(&state)?;
-    let owner_id = operators
-        .schedule_owner(&p, &device.group_id)
-        .ok_or_else(forbidden)?;
-    let schedule = Schedule {
-        id: random_token().map_err(bad)?,
-        name: name.into(),
-        owner: p.user.username.clone(),
-        repeat: body.repeat,
-        next_run: Some(body.run_at),
-        last_run: None,
-    };
+    let operators = operators(state)?;
+    let prepared: Vec<_> = nodes
+        .into_iter()
+        .map(|node| {
+            let device = authorized_device(&agent, p, &node, true)?;
+            if !scripts::supports_scripts(&device) {
+                return Err(bad("Scheduling requires a macOS or Linux device."));
+            }
+            let owner_id = operators
+                .schedule_owner(p, &device.group_id)
+                .ok_or_else(forbidden)?;
+            Ok(Entry {
+                schedule: Schedule {
+                    id: random_token().map_err(bad)?,
+                    name: name.into(),
+                    owner: p.user.username.clone(),
+                    repeat: body.repeat,
+                    next_run: Some(body.run_at),
+                    last_run: None,
+                },
+                node,
+                group: device.group_id,
+                owner_id,
+                script: script.clone(),
+            })
+        })
+        .collect::<ApiResult<_>>()?;
     operators.schedules.update(|entries| {
-        if agent.registry.device(&node).is_none() {
-            return Err(ApiFailure(
-                StatusCode::NOT_FOUND,
-                "Device not found.".into(),
-            ));
-        }
-        if entries.len() >= CAPACITY {
+        if entries.len() + prepared.len() > CAPACITY {
             return Err(ApiFailure(
                 StatusCode::CONFLICT,
                 "Task limit reached. Remove completed tasks to make space.".into(),
             ));
         }
-        operators
-            .audit
-            .record(
-                &p.user.username,
-                "schedule.create",
-                &schedule.id,
-                "requested",
-            )
-            .map_err(bad)?;
-        entries.push(Entry {
-            schedule: schedule.clone(),
-            node,
-            group: device.group_id,
-            owner_id,
-            script,
-        });
-        Ok(())
-    })?;
-    Ok((StatusCode::CREATED, Json(schedule)))
+        for entry in &prepared {
+            if agent
+                .registry
+                .device(&entry.node)
+                .is_none_or(|device| device.group_id != entry.group)
+            {
+                return Err(ApiFailure(
+                    StatusCode::CONFLICT,
+                    "Device list changed. Refresh and try again.".into(),
+                ));
+            }
+        }
+        for entry in &prepared {
+            operators
+                .audit
+                .record(
+                    &p.user.username,
+                    "schedule.create",
+                    &entry.schedule.id,
+                    "requested",
+                )
+                .map_err(bad)?;
+        }
+        let results = prepared
+            .iter()
+            .map(|entry| DeviceSchedule {
+                device_id: entry.node.clone(),
+                task: entry.schedule.clone(),
+            })
+            .collect();
+        entries.extend(prepared);
+        Ok(results)
+    })
 }
 
 async fn remove(
@@ -309,7 +404,9 @@ async fn remove(
         let index = entries
             .iter()
             .position(|entry| {
-                entry.schedule.id == id && visible(entry, &node, &p, owner_id.as_deref())
+                entry.schedule.id == id
+                    && entry.node == node
+                    && visible(entry, &p, owner_id.as_deref())
             })
             .ok_or_else(|| ApiFailure(StatusCode::NOT_FOUND, "Scheduled task not found.".into()))?;
         if running(&entries[index].schedule) {

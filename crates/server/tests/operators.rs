@@ -529,6 +529,78 @@ async fn group_management_and_device_apis_enforce_scoped_permissions() {
             );
         }
     }
+    let second = rt
+        .registry
+        .connect(AuthenticatedPeer {
+            node_id: "second-device".into(),
+            node_id_hex: "A2".repeat(48),
+            mesh_id_hex: group_id.into(),
+            name: "Second fixture".into(),
+            group: "Second lab".into(),
+            architecture: 29,
+        })
+        .unwrap();
+    let (scoped_token, scoped) = store
+        .login("operator", "scoped-password-123".into())
+        .await
+        .unwrap();
+    store
+        .bind_external_identity("operator", "operator-auth-fixture")
+        .unwrap();
+    store
+        .bind_external_identity(&admin.user.username, "admin-auth-fixture")
+        .unwrap();
+    let batch = json!({
+        "devices": ["second-device", "test-device"],
+        "task": {
+            "name": "Batch fixture",
+            "script": "exit 0",
+            "run_at": (chrono::Utc::now() + chrono::TimeDelta::minutes(5)).to_rfc3339(),
+            "repeat": "once"
+        }
+    });
+    assert_eq!(
+        request(
+            app.clone(),
+            "/api/v1/schedules",
+            "POST",
+            Some(&scoped_token),
+            Some(&scoped.csrf),
+            None,
+            batch.clone(),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        admin_request!("/api/v1/schedules", "GET", Value::Null).1,
+        json!([])
+    );
+    let (status, created) = admin_request!("/api/v1/schedules", "POST", batch);
+    assert_eq!(status, StatusCode::CREATED);
+    let tasks = created.as_array().unwrap();
+    assert_eq!(tasks.len(), 2);
+    assert_ne!(tasks[0]["id"], tasks[1]["id"]);
+    assert_eq!(tasks[0]["device_id"], "second-device");
+    assert_eq!(tasks[1]["device_id"], "test-device");
+    for task in tasks {
+        let path = format!(
+            "/api/v1/devices/{}/schedules/{}",
+            task["device_id"].as_str().unwrap(),
+            task["id"].as_str().unwrap()
+        );
+        assert_eq!(
+            admin_request!(&path, "DELETE", Value::Null).0,
+            StatusCode::NO_CONTENT
+        );
+    }
+    drop(second);
+    assert_eq!(
+        admin_request!("/api/v1/devices/second-device", "DELETE", Value::Null).0,
+        StatusCode::NO_CONTENT
+    );
+
     // A group with an access grant cannot disappear underneath an operator.
     assert_eq!(
         admin_request!(&group_path, "DELETE", Value::Null).0,

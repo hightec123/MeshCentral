@@ -11,6 +11,14 @@ recurrence on restore. The dashboard build and 26 browser regressions passed.
 Local evidence is in the ignored `schedules-management-ui-acceptance.json`
 and `linux-schedules-management-ui-acceptance.json`.
 
+The fleet task picker also passed on both labs. The Linux batch targeted the
+connected stock agent and a second offline lab device. The online target
+returned exit code 7 and the offline target was recorded as unavailable. An
+API regression test verified that a batch containing an unauthorized device
+left no tasks behind. Local evidence is in the ignored
+`fleet-management-ui-acceptance.json` and
+`linux-fleet-management-ui-acceptance.json`.
+
 ## Scoped shell scripts
 
 Date: 6 November 2026 (Pacific/Auckland). The dashboard ran a shell script

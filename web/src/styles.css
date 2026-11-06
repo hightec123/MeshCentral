@@ -1017,6 +1017,29 @@ td {
 .field-label textarea {
   resize: vertical;
 }
+.schedule-panel fieldset {
+  border: 0;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+}
+.schedule-panel .schedule-targets {
+  margin-bottom: 18px;
+}
+.schedule-targets legend {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.schedule-targets label {
+  display: block;
+  margin: 6px 0;
+  overflow-wrap: anywhere;
+}
+.schedule-panel article {
+  border-top: 1px solid #e6ebf3;
+  padding-bottom: 12px;
+}
 .form-actions {
   display: flex;
   align-items: center;

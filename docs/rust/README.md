@@ -97,6 +97,13 @@ Creating tasks requires a provisioned Better Auth account with device control.
 Task definitions are stored privately. A server restart does not replay a
 claimed run, and restoring an archive disables pending tasks.
 
+For several devices, open **Tasks** in the main navigation and select up to
+eight macOS or Linux devices. Each device gets its own task, result and
+cancel button. The server checks every selected device before saving the batch.
+The equivalent API is `POST /api/v1/schedules` with a `devices` array of device
+IDs and a `task` object using the same fields as a single-device request.
+`GET /api/v1/schedules` lists the caller's visible tasks with their device IDs.
+
 For frontend hot reload, keep the Rust process running and use another terminal:
 
 ```sh
