@@ -5,7 +5,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
-use meshcentral_server::{app, validate_listen};
+use meshcentral_server::{app, app_with_console_origin, validate_listen};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -113,6 +113,63 @@ async fn browser_dns_rebinding_hosts_are_rejected() {
                     .body(Body::empty())
                     .unwrap(),
             )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
+}
+
+#[tokio::test]
+async fn https_console_requires_its_configured_authority_and_origin() {
+    let router = app_with_console_origin(
+        "nonexistent-web-build".into(),
+        None,
+        None,
+        Some("https://console.example.test:3443".parse().unwrap()),
+    );
+    for (uri, host, origin, status) in [
+        (
+            "/healthz",
+            Some("console.example.test:3443"),
+            Some("https://console.example.test:3443"),
+            StatusCode::OK,
+        ),
+        (
+            "https://console.example.test:3443/healthz",
+            None,
+            None,
+            StatusCode::OK,
+        ),
+        (
+            "/healthz",
+            Some("console.example.test:3443"),
+            Some("http://console.example.test:3443"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "/healthz",
+            Some("127.0.0.1:3443"),
+            None,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "https://attacker.example.test:3443/healthz",
+            Some("console.example.test:3443"),
+            None,
+            StatusCode::FORBIDDEN,
+        ),
+        ("/healthz", None, None, StatusCode::FORBIDDEN),
+    ] {
+        let mut request = Request::builder().uri(uri);
+        if let Some(host) = host {
+            request = request.header("host", host);
+        }
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        let response = router
+            .clone()
+            .oneshot(request.body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), status);

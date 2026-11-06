@@ -19,9 +19,8 @@ cargo run --locked -p meshcentral-server
 ```
 
 Rust starts the authentication service on a random IPv4 loopback port and serves
-the dashboard/authentication proxy at the existing console URL. No second public
-port or cross-origin frontend configuration is needed. Both public Rust listeners
-remain restricted to loopback in this preview.
+the dashboard/authentication proxy at the console URL. Both Rust listeners bind
+to loopback.
 
 For a fresh workspace, stop Rust and bootstrap the first administrator:
 
@@ -49,6 +48,27 @@ At sign-in, use the current authenticator code or an unused recovery code.
 The password step grants a five-minute challenge. Rust grants device access
 after the second factor establishes a dashboard session. Trusted-device
 exceptions are disabled.
+
+## Serve the console over HTTPS
+
+Supply a PEM certificate chain and matching private key for the exact origin
+you will open in the browser. Keep the private key readable only by the server
+operator.
+
+```sh
+MCR_LISTEN=127.0.0.1:3443 \
+MCR_CONSOLE_ORIGIN=https://localhost:3443 \
+MCR_CONSOLE_CERT=/path/to/fullchain.pem \
+MCR_CONSOLE_KEY=/path/to/privkey.pem \
+cargo run --locked -p meshcentral-server
+```
+
+Open **https://localhost:3443** with a certificate your browser trusts. Configure
+all three console TLS settings together. The origin contains only scheme, host
+and any non-default port. The Rust listener serves HTTPS and WSS on that port,
+checks the requested authority and Origin against the configured URL, and issues
+Secure dashboard cookies through Better Auth. Restart to load renewed PEM files.
+The native agent listener continues to use its own pinned certificate and port.
 
 ## Boundaries
 

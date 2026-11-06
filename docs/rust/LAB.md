@@ -18,6 +18,12 @@ The server and foreground agent were left running after acceptance testing:
 - Local test evidence: `.local/evidence/` (screenshots and before/after JSON).
 - Private console credentials: `.local/operator-login.json` (mode 0600, never committed).
 
+To verify MFA with the stock lab agent, run `node scripts/verify-live-lab.cjs --mfa`.
+The helper provisions a temporary operator, enrolls an authenticator, signs in
+using an authenticator code and a recovery code, and removes the account after
+checking remote-session logout. Existing operators enroll their own authenticators
+from **Account**. The run writes `.local/evidence/mfa-management-ui-acceptance.json`.
+
 After stopping these processes, start them again in separate terminals from the
 repository root:
 

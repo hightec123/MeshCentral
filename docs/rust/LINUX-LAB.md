@@ -24,7 +24,8 @@ configuration/database is isolated; no system agent service is installed.
 
 The VM is defined by `scripts/lab/linux.yaml`: no host filesystem mounts, no
 container runtime, and all automatic TCP/UDP forwarding disabled. Lima state
-lives under `/private/tmp/mcr-lima`; the downloaded OS image uses Lima's ordinary
+lives under the private `.local/lima` directory via the short
+`/private/tmp/mcr-lima` symlink; the downloaded OS image uses Lima's ordinary
 host cache. The [Lima configuration](https://lima-vm.io/docs/config/) and
 [environment variable guide](https://lima-vm.io/docs/config/environment-variables/)
 describe those controls.
@@ -37,12 +38,18 @@ the host LAN. Server certificate pinning and explicit NodeID approval remain on.
 - Private login helper: `.local/linux-operator-login.json` (0600, ignored).
 - Active recovered server state: `.local/backups/linux-restored-030/`.
 - Original state retained unchanged: `.local/linux-server/`.
-- Agent directory inside VM: `/home/vincent.linux/meshcentral-lab/`.
+- Agent directory inside VM: `~/meshcentral-lab/`.
 - Exact expected NodeID and test evidence: `.local/linux-agent/identity.json`
   and `.local/evidence/linux-*.json` (ignored).
 
 The independent macOS console remains on port 3000 and its native listener on
 8443. Linux testing does not expand the macOS server's admission policy.
+
+On 6 November 2026 the temporary VM directory was missing. The rebuilt VM used
+the same checksum-matched stock binary with a fresh node certificate. The Linux
+server retained its original keys, group, accounts and offline device record.
+The replacement node was explicitly added to the lab allowlist. The MFA run
+verified terminal, file round-trip, desktop input and logout on that node.
 
 ## Reproduce the native lab
 
@@ -50,6 +57,8 @@ The independent macOS console remains on port 3000 and its native listener on
    separate Lima home:
 
    ```sh
+   mkdir -m 700 .local/lima
+   ln -s "$PWD/.local/lima" /private/tmp/mcr-lima
    LIMA_HOME=/private/tmp/mcr-lima limactl start --name=mcr-linux --tty=false scripts/lab/linux.yaml
    ```
 
@@ -77,7 +86,7 @@ The independent macOS console remains on port 3000 and its native listener on
 5. Prepare this workspace's private expected-identity/login helpers and run:
 
    ```sh
-   node scripts/verify-live-lab.cjs --linux
+   node scripts/verify-live-lab.cjs --linux --mfa
    ```
 
 The helper only accepts the fixed local Linux URL and recorded expected NodeID.

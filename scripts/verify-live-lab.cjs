@@ -2,19 +2,25 @@
 // Credentials and artifacts stay under ignored .local/. Never target production.
 const fs = require("node:fs");
 const path = require("node:path");
+const { randomBytes, randomUUID } = require("node:crypto");
+const { createRequire } = require("node:module");
 const { chromium, devices } = require("../web/node_modules/playwright");
 const { expect } = require("../web/node_modules/@playwright/test");
+const webRequire = createRequire(require.resolve("../web/package.json"));
 async function main() {
   const root = path.join(__dirname, "..");
-  const linux = process.argv.slice(2).join(" ") === "--linux";
-  if (process.argv.length > 2 && !linux)
-    throw new Error("Only --linux is supported.");
+  const flags = process.argv.slice(2);
+  const linux = flags.includes("--linux");
+  const mfa = flags.includes("--mfa");
+  if (flags.some((flag) => !["--linux", "--mfa"].includes(flag)))
+    throw new Error("Supported flags: --linux and --mfa.");
   const linuxIdentity = linux
     ? JSON.parse(
         fs.readFileSync(path.join(root, ".local/linux-agent/identity.json")),
       )
     : null;
   const prefix = linux ? "linux-" : "";
+  const evidencePrefix = prefix + (mfa ? "mfa-" : "");
   const credentials = JSON.parse(
     fs.readFileSync(
       path.join(root, ".local/" + prefix + "operator-login.json"),
@@ -33,8 +39,13 @@ async function main() {
   )
     throw new Error("This acceptance script only targets the local lab URL.");
   const scratch = linux
-    ? "/home/vincent.linux/meshcentral-lab/acceptance"
+    ? linuxIdentity.remote_scratch
     : path.join(root, ".local/lab-agent/acceptance");
+  if (
+    linux &&
+    !/^\/home\/[a-zA-Z0-9._-]+\/meshcentral-lab\/acceptance$/.test(scratch)
+  )
+    throw new Error("Invalid Linux lab scratch directory.");
   if (!linux) fs.mkdirSync(scratch, { recursive: true, mode: 0o700 });
   const browser = await chromium.launch();
   const context = await browser.newContext({
@@ -48,19 +59,105 @@ async function main() {
     if (message.type() === "error") errors.push(message.text());
   });
   let original, csrf;
+  let admin, adminCsrf, operator, totp, recoveryCode;
   const result = {};
-  try {
-    await page.goto(credentials.url);
-    await page
-      .getByLabel("Username", { exact: true })
-      .fill(credentials.username);
-    await page
-      .getByLabel("Password", { exact: true })
-      .fill(credentials.password);
+  const dashboard = page.getByRole("heading", { name: "Devices", exact: true });
+  async function signIn(account, factor) {
+    await page.getByLabel("Username", { exact: true }).fill(account.username);
+    await page.getByLabel("Password", { exact: true }).fill(account.password);
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
-    await expect(
-      page.getByRole("heading", { name: "Devices", exact: true }),
-    ).toBeVisible();
+    if (factor) {
+      await expect(
+        page.getByRole("heading", { name: "Verify your sign-in" }),
+      ).toBeVisible();
+      expect(
+        (
+          await context.request.get(credentials.url + "/api/v1/devices")
+        ).status(),
+      ).toBe(401);
+      if (factor === "recovery") {
+        await page.getByRole("button", { name: "Use a recovery code" }).click();
+        await page
+          .getByLabel("Recovery code", { exact: true })
+          .fill(recoveryCode);
+      } else {
+        await page
+          .getByLabel("Authenticator code", { exact: true })
+          .fill(await totp.totp());
+      }
+      await page.getByRole("button", { name: "Verify", exact: true }).click();
+    }
+    await expect(dashboard).toBeVisible();
+  }
+  try {
+    if (mfa) {
+      admin = await browser.newContext({ baseURL: credentials.url });
+      const headers = { Origin: credentials.url };
+      const login = await admin.request.post("/api/v1/auth/login", {
+        headers,
+        data: {
+          username: credentials.username,
+          password: credentials.password,
+        },
+      });
+      expect(login.status()).toBe(200);
+      adminCsrf = (await login.json()).csrf;
+      const account = {
+        username: "mfa-lab-" + randomUUID().slice(0, 8),
+        password: randomBytes(24).toString("base64url"),
+      };
+      const create = await admin.request.post("/api/v1/users", {
+        headers: { ...headers, "X-CSRF-Token": adminCsrf },
+        data: {
+          user: {
+            username: account.username,
+            role: "administrator",
+            groups: [],
+          },
+          password: account.password,
+        },
+      });
+      expect(create.ok()).toBe(true);
+      operator = account;
+    }
+    await page.goto(credentials.url);
+    await signIn(operator ?? credentials);
+    if (mfa) {
+      const { base32 } = await import(
+        webRequire.resolve("@better-auth/utils/base32")
+      );
+      const { createOTP } = await import(
+        webRequire.resolve("@better-auth/utils/otp")
+      );
+      await page.getByRole("button", { name: "Account", exact: true }).click();
+      await page
+        .getByLabel("Password for two-factor settings")
+        .fill(operator.password);
+      await page.getByRole("button", { name: "Set up authenticator" }).click();
+      await expect(
+        page.getByRole("img", { name: "Authenticator setup QR code" }),
+      ).toBeVisible();
+      await page.getByText("Enter a setup key manually").click();
+      totp = createOTP(
+        base32.decode(await page.locator(".mfa-key").innerText()),
+      );
+      await page
+        .getByLabel("Authenticator code", { exact: true })
+        .fill(await totp.totp());
+      await page
+        .getByRole("button", { name: "Enable two-factor authentication" })
+        .click();
+      recoveryCode = await page
+        .getByRole("list", { name: "Recovery codes" })
+        .getByRole("listitem")
+        .first()
+        .innerText();
+      await page.getByRole("button", { name: "Done", exact: true }).click();
+      await page.getByRole("button", { name: "Sign out", exact: true }).click();
+      await signIn(operator, "totp");
+      result.authenticator_sign_in = true;
+      result.password_only_inventory_denied = true;
+    }
     const auth = await (
       await context.request.get(credentials.url + "/api/v1/auth/session")
     ).json();
@@ -82,10 +179,12 @@ async function main() {
     original = inventory.devices.find((d) => d.id === expected);
     if (original.group !== "Rust lab")
       throw new Error("Configured agent is not in the disposable lab group.");
+    const deviceButton = page
+      .getByRole("row")
+      .filter({ has: page.getByRole("cell", { name: "Online", exact: true }) })
+      .getByRole("button", { name: original.name, exact: true });
     await page.getByRole("button", { name: "Refresh", exact: true }).click();
-    await page
-      .getByRole("button", { name: original.name, exact: true })
-      .click();
+    await deviceButton.click();
     const workspace = page.getByRole("dialog", { name: original.name });
     await workspace
       .getByLabel("Notes", { exact: true })
@@ -187,9 +286,9 @@ async function main() {
           "--",
           "sh",
           "-c",
-          "DISPLAY=:99 XAUTHORITY=/home/vincent.linux/meshcentral-lab/empty.xauth nohup xterm -title MCR-Input-Receiver -geometry 100x30+0+0 -e python3 /home/vincent.linux/meshcentral-lab/desktop-input-receiver.py " +
-            inputName +
-            " >/home/vincent.linux/meshcentral-lab/input-receiver.log 2>&1 </dev/null &",
+          'cd "$HOME/meshcentral-lab" && DISPLAY=:99 XAUTHORITY="$PWD/empty.xauth" nohup xterm -title MCR-Input-Receiver -geometry 100x30+0+0 -e python3 ./desktop-input-receiver.py "$1" >input-receiver.log 2>&1 </dev/null &',
+          "receiver",
+          inputName,
         ],
         {
           env: { ...process.env, LIMA_HOME: "/private/tmp/mcr-lima" },
@@ -302,7 +401,7 @@ async function main() {
     await page.screenshot({
       path: path.join(
         root,
-        ".local/evidence/" + prefix + "management-console-desktop.png",
+        ".local/evidence/" + evidencePrefix + "management-console-desktop.png",
       ),
       fullPage: true,
     });
@@ -323,7 +422,7 @@ async function main() {
     await mobile.screenshot({
       path: path.join(
         root,
-        ".local/evidence/" + prefix + "management-console-mobile.png",
+        ".local/evidence/" + evidencePrefix + "management-console-mobile.png",
       ),
       fullPage: true,
     });
@@ -371,9 +470,7 @@ async function main() {
         ),
       );
     }, proofSockets);
-    await page
-      .getByRole("button", { name: original.name, exact: true })
-      .click();
+    await deviceButton.click();
     const terminalWorkspace = page.getByRole("dialog", { name: original.name });
     await terminalWorkspace
       .getByRole("tab", { name: "Terminal", exact: true })
@@ -408,16 +505,8 @@ async function main() {
     ).toBe(401);
     await secondTab.close();
     result.logout_closes_native_remote_sessions = true;
-    await page
-      .getByLabel("Username", { exact: true })
-      .fill(credentials.username);
-    await page
-      .getByLabel("Password", { exact: true })
-      .fill(credentials.password);
-    await page.getByRole("button", { name: "Sign in", exact: true }).click();
-    await expect(
-      page.getByRole("heading", { name: "Devices", exact: true }),
-    ).toBeVisible();
+    await signIn(operator ?? credentials, mfa ? "recovery" : undefined);
+    if (mfa) result.recovery_code_sign_in = true;
     csrf = (
       await (
         await context.request.get(credentials.url + "/api/v1/auth/session")
@@ -438,7 +527,7 @@ async function main() {
     fs.writeFileSync(
       path.join(
         root,
-        ".local/evidence/" + prefix + "management-ui-acceptance.json",
+        ".local/evidence/" + evidencePrefix + "management-ui-acceptance.json",
       ),
       JSON.stringify(
         { recorded_at: new Date().toISOString(), ...result },
@@ -463,10 +552,23 @@ async function main() {
           },
         )
         .catch(() => {});
-    await browser.close();
+    try {
+      if (operator && adminCsrf) {
+        const headers = { Origin: credentials.url, "X-CSRF-Token": adminCsrf };
+        const removed = await admin.request.delete(
+          "/api/v1/users/" + operator.username,
+          { headers },
+        );
+        expect(removed.ok()).toBe(true);
+        await admin.request.post("/api/auth/sign-out", { headers, data: {} });
+      }
+    } finally {
+      await browser.close();
+    }
   }
 }
 main().catch((error) => {
-  console.error(error);
+  // Playwright request diagnostics can include authenticated request headers.
+  console.error(String(error.message ?? error).split("\n")[0]);
   process.exitCode = 1;
 });

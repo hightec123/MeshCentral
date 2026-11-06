@@ -3,13 +3,12 @@ use axum_server::tls_rustls::RustlsConfig;
 use meshcentral_server::{
     Config,
     agent::AgentRuntime,
-    app_with_services,
+    app_with_console_origin,
     auth::AdmissionPolicy,
     identity::{Identity, decode_hex, hex},
     storage,
 };
 use std::{path::Path, time::Duration};
-use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -53,7 +52,7 @@ async fn main() -> Result<()> {
             operators.bootstrap(&args[1], password.trim_end_matches(['\r', '\n']))?;
             let mut auth = meshcentral_server::dashboard_auth::AuthProcess::start(
                 &config.data_dir,
-                &format!("http://{}", config.listen),
+                &config.console_origin(),
                 &operators,
             )
             .await?;
@@ -72,6 +71,19 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
+    let console_origin = config.console_origin();
+    let console_tls = if let Some(tls) = &config.console_tls {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+        Some(
+            RustlsConfig::from_pem_file(&tls.cert, &tls.key)
+                .await
+                .context("loading console TLS certificate and key")?,
+        )
+    } else {
+        None
+    };
     let initialized = config.data_dir.join("identity.json").exists();
     ensure!(
         initialized || !config.data_dir.join("admission.json").exists(),
@@ -93,7 +105,7 @@ async fn main() -> Result<()> {
     let _runtime_lifetime = runtime.clone();
     let mut auth = meshcentral_server::dashboard_auth::AuthProcess::start(
         &config.data_dir,
-        &format!("http://{}", config.listen),
+        &console_origin,
         &operators,
     )
     .await?;
@@ -116,8 +128,9 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|e| e.into_inner()) = config.agent_listen;
         *runtime.audit.write().unwrap_or_else(|e| e.into_inner()) = Some(operators.audit.clone());
     }
-    let listener = TcpListener::bind(config.listen).await?;
-    tracing::info!(address = %listener.local_addr()?, enrollment = runtime.is_some(), "MeshCentral Rust local lab console");
+    let listener = std::net::TcpListener::bind(config.listen)?;
+    listener.set_nonblocking(true)?;
+    tracing::info!(address = %listener.local_addr()?, origin = %console_origin, enrollment = runtime.is_some(), "MeshCentral Rust console");
     if !config.web_dir.join("index.html").is_file() {
         tracing::warn!("Frontend not built; run npm --prefix web run build or use Vite.");
     }
@@ -146,35 +159,49 @@ async fn main() -> Result<()> {
         None
     };
 
-    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let mut http_task = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app_with_services(config.web_dir, runtime, Some(operators)),
+    let console_handle = axum_server::Handle::new();
+    let handle = console_handle.clone();
+    let mut console_task = tokio::spawn(async move {
+        let app = app_with_console_origin(
+            config.web_dir,
+            runtime,
+            Some(operators),
+            config.console_tls.map(|tls| tls.origin),
         )
-        .with_graceful_shutdown(async {
-            let _ = stop_rx.await;
-        })
-        .await
+        .into_make_service();
+        match console_tls {
+            Some(tls) => {
+                axum_server::from_tcp_rustls(listener, tls)
+                    .handle(handle)
+                    .serve(app)
+                    .await
+            }
+            None => {
+                axum_server::from_tcp(listener)
+                    .handle(handle)
+                    .serve(app)
+                    .await
+            }
+        }
     });
 
     if let Some(mut native) = tls_task {
         tokio::select! {
             () = shutdown() => {
                 tls_handle.graceful_shutdown(Some(Duration::from_secs(2)));
-                let _ = stop_tx.send(());
-                http_task.await??;
+                console_handle.graceful_shutdown(Some(Duration::from_secs(2)));
+                console_task.await??;
                 native.await??;
             }
-            result = &mut http_task => { tls_handle.shutdown(); native.abort(); result??; anyhow::bail!("HTTP listener stopped unexpectedly"); }
-            result = &mut native => { let _ = stop_tx.send(()); http_task.await??; result??; anyhow::bail!("native agent listener stopped unexpectedly"); }
-            result=auth.wait()=>{tls_handle.shutdown();http_task.abort();native.abort();monitor.abort();result?;}
+            result = &mut console_task => { tls_handle.shutdown(); native.abort(); result??; anyhow::bail!("console listener stopped unexpectedly"); }
+            result = &mut native => { console_handle.graceful_shutdown(Some(Duration::from_secs(2))); console_task.await??; result??; anyhow::bail!("native agent listener stopped unexpectedly"); }
+            result=auth.wait()=>{tls_handle.shutdown();console_task.abort();native.abort();monitor.abort();result?;}
         }
     } else {
         tokio::select! {
-            () = shutdown() => { let _ = stop_tx.send(()); http_task.await??; }
-            result = &mut http_task => { result??; anyhow::bail!("HTTP listener stopped unexpectedly"); }
-            result=auth.wait()=>{http_task.abort();monitor.abort();result?;}
+            () = shutdown() => { console_handle.graceful_shutdown(Some(Duration::from_secs(2))); console_task.await??; }
+            result = &mut console_task => { result??; anyhow::bail!("console listener stopped unexpectedly"); }
+            result=auth.wait()=>{console_task.abort();monitor.abort();result?;}
         }
     }
     monitor.abort();

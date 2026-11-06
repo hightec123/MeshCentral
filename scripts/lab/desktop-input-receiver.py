@@ -7,7 +7,7 @@ import sys
 name = sys.argv[1]
 if not re.fullmatch(r"desktop-input-[0-9]+\.txt", name):
     raise SystemExit("Invalid lab fixture filename")
-target = Path("/home/vincent.linux/meshcentral-lab/acceptance") / name
+target = Path.home() / "meshcentral-lab" / "acceptance" / name
 print("MeshCentral disposable desktop input test. Type the marker, then Enter.", flush=True)
 line = sys.stdin.readline()
 descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

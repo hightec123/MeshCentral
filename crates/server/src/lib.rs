@@ -17,7 +17,7 @@ use axum::{
     Json, Router,
     extract::Request,
     extract::State,
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderValue, StatusCode, Uri, header},
     middleware::{self, Next},
     response::IntoResponse,
     routing::{any, get},
@@ -31,6 +31,14 @@ pub struct Config {
     pub agent_listen: SocketAddr,
     pub data_dir: PathBuf,
     pub web_dir: PathBuf,
+    pub console_tls: Option<ConsoleTls>,
+}
+
+#[derive(Debug)]
+pub struct ConsoleTls {
+    pub origin: Uri,
+    pub cert: PathBuf,
+    pub key: PathBuf,
 }
 
 impl Config {
@@ -51,17 +59,49 @@ impl Config {
         let web_dir = std::env::var_os("MCR_WEB_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("web/dist"));
+        let console_tls = match (
+            std::env::var_os("MCR_CONSOLE_ORIGIN"),
+            std::env::var_os("MCR_CONSOLE_CERT"),
+            std::env::var_os("MCR_CONSOLE_KEY"),
+        ) {
+            (None, None, None) => None,
+            (Some(origin), Some(cert), Some(key)) => {
+                let raw = origin.to_str().ok_or("Invalid console origin")?;
+                let url = reqwest::Url::parse(raw).map_err(|_| "Invalid console origin")?;
+                let canonical = url.origin().ascii_serialization();
+                if url.scheme() != "https" || canonical != raw {
+                    return Err("MCR_CONSOLE_ORIGIN must be a canonical HTTPS origin without a path, such as https://localhost:3443".into());
+                }
+                Some(ConsoleTls {
+                    origin: canonical.parse().map_err(|_| "Invalid console origin")?,
+                    cert: cert.into(),
+                    key: key.into(),
+                })
+            }
+            _ => {
+                return Err(
+                    "Set MCR_CONSOLE_ORIGIN, MCR_CONSOLE_CERT and MCR_CONSOLE_KEY together".into(),
+                );
+            }
+        };
         Ok(Self {
             listen,
             agent_listen,
             data_dir,
             web_dir,
+            console_tls,
         })
+    }
+
+    pub fn console_origin(&self) -> String {
+        self.console_tls.as_ref().map_or_else(
+            || format!("http://{}", self.listen),
+            |tls| format!("https://{}", tls.origin.authority().unwrap()),
+        )
     }
 }
 
-/// Keep the preview local until HTTPS, deployment and multi-platform acceptance
-/// are implemented and checked; there is deliberately no override switch.
+/// Both console transports and the native agent listener bind to loopback.
 pub fn validate_listen(address: SocketAddr) -> Result<(), String> {
     if address.ip().is_loopback() {
         Ok(())
@@ -151,6 +191,15 @@ pub fn app_with_services(
     runtime: Option<Arc<agent::AgentRuntime>>,
     operators: Option<Arc<operators::Operators>>,
 ) -> Router {
+    app_with_console_origin(web_dir, runtime, operators, None)
+}
+
+pub fn app_with_console_origin(
+    web_dir: PathBuf,
+    runtime: Option<Arc<agent::AgentRuntime>>,
+    operators: Option<Arc<operators::Operators>>,
+    console_origin: Option<Uri>,
+) -> Router {
     let state = AppState {
         started: Instant::now(),
         runtime,
@@ -192,12 +241,37 @@ pub fn app_with_services(
             ),
         ))
         .layer(TraceLayer::new_for_http())
-        .layer(middleware::from_fn(local_host_only))
+        .layer(middleware::from_fn_with_state(console_origin, validate_authority))
         .layer(axum::extract::DefaultBodyLimit::max(64*1024))
         .with_state(state)
 }
 
-async fn local_host_only(request: Request, next: Next) -> axum::response::Response {
+async fn validate_authority(
+    State(console_origin): State<Option<Uri>>,
+    mut request: Request,
+    next: Next,
+) -> axum::response::Response {
+    if let Some(origin) = console_origin {
+        let authority = origin.authority().expect("configured console authority");
+        let target = request.uri().authority();
+        let host = request.headers().get(header::HOST);
+        // HTTP/2 supplies :authority. Check both fields when both are present.
+        if (target.is_none() && host.is_none())
+            || target.is_some_and(|value| value.as_str() != authority.as_str())
+            || host.is_some_and(|value| value.as_bytes() != authority.as_str().as_bytes())
+            || request
+                .headers()
+                .get(header::ORIGIN)
+                .is_some_and(|value| value.as_bytes() != format!("https://{authority}").as_bytes())
+        {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        request.headers_mut().insert(
+            header::HOST,
+            HeaderValue::from_str(authority.as_str()).expect("validated console authority"),
+        );
+        return next.run(request).await;
+    }
     // Binding to loopback alone does not prevent browser DNS rebinding.
     if let Some(host) = request.headers().get(header::HOST) {
         let valid = host

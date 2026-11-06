@@ -28,24 +28,28 @@ database.exec(
 );
 chmodSync(join(directory, "dashboard-auth.sqlite"), 0o600);
 const base = new URL(origin);
+const secureConsole = base.protocol === "https:";
 if (
-  !["127.0.0.1", "localhost", "[::1]"].includes(base.hostname) ||
-  base.protocol !== "http:"
+  !secureConsole &&
+  (base.protocol !== "http:" ||
+    !["127.0.0.1", "localhost", "[::1]"].includes(base.hostname))
 )
-  throw new Error("Only the loopback preview is supported.");
+  throw new Error("An HTTP console must use loopback.");
 const options = {
   appName: "MeshCentral Rust",
   baseURL: origin,
   basePath: "/api/auth",
   secret: secrets.secret,
   database,
-  trustedOrigins: [
-    origin,
-    `http://localhost:${base.port}`,
-    `http://127.0.0.1:${base.port}`,
-    `http://[::1]:${base.port}`,
-    "http://127.0.0.1:5173",
-  ],
+  trustedOrigins: secureConsole
+    ? [origin]
+    : [
+        origin,
+        `http://localhost:${base.port}`,
+        `http://127.0.0.1:${base.port}`,
+        `http://[::1]:${base.port}`,
+        "http://127.0.0.1:5173",
+      ],
   emailAndPassword: {
     enabled: true,
     disableSignUp: true,
@@ -110,7 +114,7 @@ const options = {
   },
   advanced: {
     cookiePrefix: secrets.cookie_prefix,
-    useSecureCookies: false,
+    useSecureCookies: secureConsole,
     defaultCookieAttributes: { httpOnly: true, sameSite: "strict", path: "/" },
   },
   logger: { level: "error" },
