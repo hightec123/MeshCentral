@@ -24,7 +24,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{Semaphore, mpsc, watch},
+    sync::{Semaphore, mpsc, oneshot, watch},
     time::{Instant, interval, timeout},
 };
 
@@ -46,6 +46,12 @@ pub struct AgentRuntime {
 struct AgentControl {
     messages: mpsc::Sender<Value>,
     stop: watch::Sender<bool>,
+    script: Option<PendingScript>,
+}
+
+struct PendingScript {
+    id: String,
+    result: oneshot::Sender<String>,
 }
 
 impl AgentRuntime {
@@ -79,6 +85,45 @@ impl AgentRuntime {
             .messages
             .try_send(message)
             .map_err(|_| anyhow::anyhow!("device command queue is full or closed"))
+    }
+    pub(crate) fn start_script(
+        &self,
+        node: &str,
+        id: String,
+        message: Value,
+    ) -> Result<oneshot::Receiver<String>> {
+        let mut commands = self.commands.lock().unwrap_or_else(|e| e.into_inner());
+        let agent = commands
+            .get_mut(node)
+            .ok_or_else(|| anyhow::anyhow!("Device is offline."))?;
+        ensure!(
+            agent.script.is_none(),
+            "A script is already pending on this device."
+        );
+        let (result, receiver) = oneshot::channel();
+        agent
+            .messages
+            .try_send(message)
+            .map_err(|_| anyhow::anyhow!("Device command queue is full or closed."))?;
+        agent.script = Some(PendingScript { id, result });
+        Ok(receiver)
+    }
+    fn script_result(&self, node: &str, response: &Value) {
+        let (Some(id), Some(output)) =
+            (response["responseid"].as_str(), response["result"].as_str())
+        else {
+            return;
+        };
+        if response["sessionid"].as_str() != Some(id) {
+            return;
+        }
+        let mut commands = self.commands.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(agent) = commands.get_mut(node)
+            && agent.script.as_ref().is_some_and(|script| script.id == id)
+            && let Some(script) = agent.script.take()
+        {
+            let _ = script.result.send(output.to_owned());
+        }
     }
     pub fn disconnect(&self, id: &str) -> Result<()> {
         self.relays.close_node(id);
@@ -132,7 +177,7 @@ async fn upgrade(
             let policy=runtime.policy.read().unwrap_or_else(|e|e.into_inner());
             if !policy.permits(&peer.mesh_id_hex,&peer.node_id_hex){Err(anyhow::anyhow!("admission changed during handshake"))} else {
                 let presence=runtime.registry.connect(peer);
-                if presence.is_ok(){runtime.commands.lock().unwrap_or_else(|e|e.into_inner()).insert(node_id.clone(),AgentControl{messages:command_tx,stop:stop_tx});}
+                if presence.is_ok(){runtime.commands.lock().unwrap_or_else(|e|e.into_inner()).insert(node_id.clone(),AgentControl{messages:command_tx,stop:stop_tx,script:None});}
                 presence
             }
         };
@@ -216,6 +261,10 @@ fn telemetry(runtime: &AgentRuntime, node: &str, bytes: &[u8]) -> Result<()> {
     }
     ensure!(bytes.len() <= 96 * 1024, "telemetry too large");
     let value: Value = serde_json::from_slice(bytes)?;
+    if value["action"] == "msg" && value["type"] == "runcommands" {
+        runtime.script_result(node, &value);
+        return Ok(());
+    }
     if let Some(action) = value["action"].as_str().map(str::to_owned)
         && ["coreinfo", "sysinfo", "netinfo", "smbios", "iplocation"].contains(&action.as_str())
     {

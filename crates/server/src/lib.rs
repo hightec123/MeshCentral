@@ -11,6 +11,7 @@ pub mod management;
 pub mod operators;
 pub mod registry;
 pub mod remote;
+mod scripts;
 pub mod storage;
 
 use axum::{
@@ -209,6 +210,7 @@ pub fn app_with_console_origin(
         .route("/v1/devices", get(inventory))
         .merge(management::routes())
         .merge(remote::routes())
+        .merge(scripts::routes())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             console::require_operator,

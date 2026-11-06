@@ -485,6 +485,11 @@ async fn group_management_and_device_apis_enforce_scoped_permissions() {
                 "POST",
                 json!({"kind":"terminal"}),
             ),
+            (
+                "/api/v1/devices/test-device/scripts/run",
+                "POST",
+                json!({"script":"printf fixture"}),
+            ),
             ("/api/v1/groups", "POST", json!({"name":"forbidden"})),
         ] {
             assert_eq!(

@@ -52,14 +52,18 @@ async function main() {
   const mfa = flags.includes("--mfa");
   const passkey = flags.includes("--passkey");
   const emailRecovery = flags.includes("--recovery");
+  const scriptRun = flags.includes("--scripts");
   if (
     flags.some(
-      (flag) => !["--linux", "--mfa", "--passkey", "--recovery"].includes(flag),
+      (flag) =>
+        !["--linux", "--mfa", "--passkey", "--recovery", "--scripts"].includes(
+          flag,
+        ),
     ) ||
     (passkey && emailRecovery)
   )
     throw new Error(
-      "Use --linux or --mfa with either --passkey or --recovery.",
+      "Use --linux, --mfa, or --scripts with either --passkey or --recovery.",
     );
   const linuxIdentity = linux
     ? JSON.parse(
@@ -69,7 +73,15 @@ async function main() {
   const prefix = linux ? "linux-" : "";
   const evidencePrefix =
     prefix +
-    (emailRecovery ? "recovery-" : passkey ? "passkey-" : mfa ? "mfa-" : "");
+    (scriptRun
+      ? "scripts-"
+      : emailRecovery
+        ? "recovery-"
+        : passkey
+          ? "passkey-"
+          : mfa
+            ? "mfa-"
+            : "");
   const credentials = JSON.parse(
     fs.readFileSync(
       path.join(root, ".local/" + prefix + "operator-login.json"),
@@ -364,6 +376,61 @@ async function main() {
     ).json();
     expect(edited.notes).toBe("MCR UI acceptance fixture");
     result.metadata_edit = true;
+    if (scriptRun) {
+      await workspace
+        .getByRole("tab", { name: "Scripts", exact: true })
+        .click();
+      await workspace
+        .getByLabel("Shell script")
+        .fill(
+          "printf '%s\\n' 'MCR_SCRIPT_STDOUT'\nprintf '%s\\n' 'MCR_SCRIPT_STDERR' >&2\nexit 7",
+        );
+      await workspace
+        .getByRole("button", { name: "Run script", exact: true })
+        .click();
+      await expect(
+        workspace.getByText("Script finished with exit code 7.", {
+          exact: true,
+        }),
+      ).toBeVisible({ timeout: 30000 });
+      await expect(workspace.getByLabel("Script output")).toContainText(
+        "MCR_SCRIPT_STDOUT",
+      );
+      await expect(workspace.getByLabel("Script output")).toContainText(
+        "MCR_SCRIPT_STDERR",
+      );
+      const run = await context.request.post(
+        credentials.url +
+          "/api/v1/devices/" +
+          encodeURIComponent(expected) +
+          "/scripts/run",
+        {
+          headers: { "X-CSRF-Token": csrf, Origin: credentials.url },
+          data: { script: "printf '%09000d' 1\nexit 0" },
+        },
+      );
+      expect(run.ok()).toBe(true);
+      const output = await run.json();
+      expect(output).toMatchObject({
+        status: "completed",
+        exit_code: 0,
+        truncated: true,
+      });
+      expect(Buffer.byteLength(output.output)).toBe(8192);
+      const { events } = await (
+        await context.request.get(credentials.url + "/api/v1/audit")
+      ).json();
+      expect(
+        events.some(
+          (event) =>
+            event.action === "script.run" &&
+            event.target === expected + "/" + output.id &&
+            event.outcome === "success",
+        ),
+      ).toBe(true);
+      result.script_output_and_exit_code = true;
+      result.script_output_cap_and_audit = true;
+    }
     await workspace.getByRole("tab", { name: "Terminal", exact: true }).click();
     await workspace
       .getByRole("button", { name: "Connect", exact: true })

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Device } from "./api";
 import { api, useAuth } from "./Auth";
 import { DesktopPanel, FilesPanel, TerminalPanel } from "./RemotePanels";
+import { ScriptPanel } from "./ScriptPanel";
 export function DeviceWorkspace({
   device,
   onClose,
@@ -69,14 +70,18 @@ export function DeviceWorkspace({
         </button>
       </div>
       <div className="device-tabs" role="tablist" aria-label="Device sections">
-        {["Overview", "Terminal", "Files", "Desktop"].map((name) => (
+        {["Overview", "Terminal", "Files", "Desktop", "Scripts"].map((name) => (
           <button
             key={name}
             role="tab"
             aria-selected={tab === name}
             disabled={
               name !== "Overview" &&
-              (!canControl || device.status !== "online" || !device.core_ready)
+              (!canControl ||
+                device.status !== "online" ||
+                !device.core_ready ||
+                (name === "Scripts" &&
+                  !["macOS", "Linux"].includes(device.platform)))
             }
             onClick={() => setTab(name)}
           >
@@ -262,6 +267,8 @@ export function DeviceWorkspace({
           <TerminalPanel node={device.id} />
         ) : tab === "Files" ? (
           <FilesPanel node={device.id} />
+        ) : tab === "Scripts" ? (
+          <ScriptPanel key={device.id} node={device.id} />
         ) : (
           <DesktopPanel node={device.id} />
         )}

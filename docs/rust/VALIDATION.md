@@ -1,5 +1,20 @@
 # Validation evidence
 
+## Scoped shell scripts
+
+Date: 6 November 2026 (Pacific/Auckland). The dashboard ran a shell script
+through each stock macOS ARM64 and Linux ARM64 lab agent and displayed standard
+output, standard error, and exit code 7. The API then ran a successful command
+producing 9,000 bytes on each agent, returned 8,192 bytes with truncation
+reported, and wrote a matching audit outcome. Rust authorization tests rejected
+an operator without control access to the target device group.
+
+Rust workspace tests, Clippy, the frontend build, and 26 browser regressions
+passed. Both labs also passed terminal, byte-exact file transfer, desktop, and
+logout cleanup checks. Local evidence is in the ignored
+`scripts-management-ui-acceptance.json` and
+`linux-scripts-management-ui-acceptance.json`.
+
 ## Better Auth dashboard milestone — version 0.4.0
 
 Date: 4 November 2026 (Pacific/Auckland). Dashboard authentication now uses the

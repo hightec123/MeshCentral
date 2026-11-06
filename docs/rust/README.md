@@ -17,6 +17,8 @@ Implemented:
   account management, password changes, and administrator/operator/viewer roles.
 - Device groups, group-scoped permissions, explicit certificate fingerprint
   approval, pinned agent configuration downloads, audit history, and session closure.
+- Single-device shell scripts for online macOS and Linux agents with scoped access,
+  combined output, exit status, and an audit trail.
 - Native TLS/WebSocket listener with persistent server keys, mutual RSA/SHA-384
   proofs, fresh nonces, exact node/mesh allowlisting, and real online/offline presence.
 - Existing-agent core distribution, system telemetry, authorized terminal, file
@@ -66,6 +68,19 @@ The HTTP console's `/agent.ashx` stays disabled; native relays use the TLS liste
 Bundled cores are built from retained upstream source. Core changes do not modify
 the native executable. Rebuild cores after changing retained agent modules, then
 restart Rust to load them.
+
+To run a script, open **Devices**, select an online macOS or Linux device, and
+open **Scripts**. Scripts run as the agent account. The dashboard allows a
+single pending run per connected device.
+
+The equivalent dashboard API is `POST /api/v1/devices/{id}/scripts/run` with
+`{"script":"printf 'hello\\n'"}`. It requires an active operator or administrator
+session, device-group control access, and the dashboard CSRF header. Scripts
+are limited to 4,096 UTF-8 bytes and replies include up to 8,192 bytes of
+combined output, the exit code, and a truncation flag. After 25 seconds
+without a reply the outcome is unknown; the script may still be running.
+Audit history records the actor, device, run ID and outcome. It does not
+store script text or output.
 
 For frontend hot reload, keep the Rust process running and use another terminal:
 
