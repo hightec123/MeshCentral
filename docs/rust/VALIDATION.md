@@ -1,5 +1,19 @@
 # Validation evidence
 
+## TCP/UDP forwarding and named routes
+
+Date: 6 November 2026 (Pacific/Auckland). The dashboard and Rust CLI forwarded
+80,000 TCP bytes and three UDP datagrams of 17, 4,095 and 303 bytes through each
+stock ARM64 agent. Both labs rejected forged and reused bridge tokens, filtered
+oversized UDP packets and replies from unexpected source ports, and closed both
+clients on dashboard logout. The native agents kept their existing binaries.
+
+The Linux agent also reached a named private IPv4 echo destination in a
+separate network namespace over both protocols. Unknown routes, protocol
+mismatches and direct address overrides were denied. Ignored evidence lives in
+`forwarding-acceptance.json`, `linux-forwarding-acceptance.json` and
+`linux-routed-forwarding-acceptance.json`.
+
 ## Scheduled shell scripts
 
 Date: 6 November 2026 (Pacific/Auckland). Both stock ARM64 lab agents ran a

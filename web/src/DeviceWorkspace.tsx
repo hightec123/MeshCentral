@@ -4,6 +4,7 @@ import { api, useAuth } from "./Auth";
 import { DesktopPanel, FilesPanel, TerminalPanel } from "./RemotePanels";
 import { ScriptPanel } from "./ScriptPanel";
 import { SchedulePanel } from "./SchedulePanel";
+import { ForwardPanel } from "./ForwardPanel";
 export function DeviceWorkspace({
   device,
   onClose,
@@ -73,24 +74,30 @@ export function DeviceWorkspace({
         </button>
       </div>
       <div className="device-tabs" role="tablist" aria-label="Device sections">
-        {["Overview", "Terminal", "Files", "Desktop", "Scripts", "Tasks"].map(
-          (name) => (
-            <button
-              key={name}
-              role="tab"
-              aria-selected={tab === name}
-              disabled={
-                name !== "Overview" &&
-                (!canControl ||
-                  (name !== "Tasks" && !canConnect) ||
-                  (["Scripts", "Tasks"].includes(name) && !supportsScripts))
-              }
-              onClick={() => setTab(name)}
-            >
-              {name}
-            </button>
-          ),
-        )}
+        {[
+          "Overview",
+          "Terminal",
+          "Files",
+          "Desktop",
+          "Scripts",
+          "Tasks",
+          "Forwarding",
+        ].map((name) => (
+          <button
+            key={name}
+            role="tab"
+            aria-selected={tab === name}
+            disabled={
+              name !== "Overview" &&
+              (!canControl ||
+                (name !== "Tasks" && !canConnect) ||
+                (["Scripts", "Tasks"].includes(name) && !supportsScripts))
+            }
+            onClick={() => setTab(name)}
+          >
+            {name}
+          </button>
+        ))}
       </div>
       <div className="device-body" role="tabpanel">
         {error && (
@@ -274,6 +281,8 @@ export function DeviceWorkspace({
           <ScriptPanel key={device.id} node={device.id} />
         ) : tab === "Tasks" ? (
           <SchedulePanel key={device.id} node={device.id} />
+        ) : tab === "Forwarding" ? (
+          <ForwardPanel key={device.id} node={device.id} />
         ) : (
           <DesktopPanel node={device.id} />
         )}

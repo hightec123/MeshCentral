@@ -24,6 +24,7 @@ const FILES: &[&str] = &[
     "operators.json",
     "audit.json",
     crate::schedules::FILE_NAME,
+    crate::forward_routes::FILE_NAME,
     "dashboard-auth.json",
     "dashboard-auth.sqlite",
 ];
@@ -270,6 +271,7 @@ pub fn restore(archive: &Path, destination: &Path, password: &str) -> Result<()>
         Registry::open(staging.0.join("inventory.json"))?;
     }
     crate::schedules::Schedules::open(staging.0.join(crate::schedules::FILE_NAME), true)?;
+    crate::forward_routes::load(&staging.0)?;
     let operators = Operators::open(&staging.0)?;
     ensure!(
         operators.users().iter().any(|user| user.admin()),

@@ -12,7 +12,7 @@ use axum::{
         Extension, Path, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
+    net::Ipv4Addr,
+    num::NonZeroU16,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -29,31 +31,67 @@ use std::{
 };
 use tokio::{
     sync::{Notify, mpsc},
-    time::{Instant, interval, timeout},
+    time::{Instant, interval, timeout, timeout_at},
 };
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+// The stock agent's receive buffer is 4096 bytes. Leave one byte to
+// distinguish an oversized datagram that the agent may have truncated.
+pub(crate) const UDP_LIMIT: usize = 4_095;
+const TCP_FRAME_LIMIT: usize = 64 * 1024;
+const FORWARD_ATTACH: Duration = Duration::from_secs(120);
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     Terminal,
     Files,
     Desktop,
+    Tcp,
+    Udp,
 }
 impl Kind {
-    fn protocol(self) -> u8 {
+    fn protocol(self) -> Option<u8> {
         match self {
-            Self::Terminal => 1,
-            Self::Files => 5,
-            Self::Desktop => 2,
+            Self::Terminal => Some(1),
+            Self::Files => Some(5),
+            Self::Desktop => Some(2),
+            Self::Tcp | Self::Udp => None,
         }
     }
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Start {
+    kind: Kind,
+    port: Option<NonZeroU16>,
+    route: Option<String>,
+}
+#[derive(Clone, Copy)]
+struct RelayTarget {
+    kind: Kind,
+    address: Ipv4Addr,
+    port: Option<NonZeroU16>,
+}
+impl From<Kind> for RelayTarget {
+    fn from(kind: Kind) -> Self {
+        Self {
+            kind,
+            address: Ipv4Addr::LOCALHOST,
+            port: None,
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 pub struct SessionInfo {
     pub id: String,
     pub node_id: String,
     pub username: String,
     pub kind: Kind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_port: Option<NonZeroU16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_address: Option<Ipv4Addr>,
     pub started_at: String,
 }
 struct Sides {
@@ -66,6 +104,7 @@ struct Entry {
     info: SessionInfo,
     owner: [u8; 32],
     agent_ticket: [u8; 32],
+    bridge_ticket: Option<[u8; 32]>,
     deadline: Instant,
     attach_deadline: Instant,
     closed: AtomicBool,
@@ -107,10 +146,20 @@ impl Hub {
         &self,
         p: &Principal,
         node: &str,
-        kind: Kind,
+        spec: impl Into<RelayTarget>,
         operators: Arc<Operators>,
         registry: Arc<Registry>,
-    ) -> Result<(SessionInfo, String)> {
+    ) -> Result<(SessionInfo, String, Option<String>)> {
+        let RelayTarget {
+            kind,
+            address,
+            port,
+        } = spec.into();
+        let forwarding = kind.protocol().is_none();
+        ensure!(
+            forwarding == port.is_some(),
+            "Supply a target port for TCP or UDP forwarding only."
+        );
         let device = registry
             .device(node)
             .ok_or_else(|| anyhow::anyhow!("device not found"))?;
@@ -146,6 +195,7 @@ impl Hub {
         );
         let id = random_token()?;
         let ticket = random_token()?;
+        let bridge_ticket = forwarding.then(random_token).transpose()?;
         let (to_browser, browser_rx) = mpsc::channel(8);
         let (to_agent, agent_rx) = mpsc::channel(8);
         let info = SessionInfo {
@@ -153,19 +203,39 @@ impl Hub {
             node_id: node.into(),
             username: p.user.username.clone(),
             kind,
+            target_port: port,
+            target_address: port.map(|_| address),
             started_at: chrono::Utc::now().to_rfc3339(),
         };
-        operators
-            .audit
-            .record(&p.user.username, "remote.start", node, "requested")?;
+        if let Some(port) = port {
+            let protocol = if kind == Kind::Tcp { "tcp" } else { "udp" };
+            operators.audit.record(
+                &p.user.username,
+                "forward.start",
+                &format!("{node}/{protocol}/{address}:{port}"),
+                "requested",
+            )?;
+        } else {
+            operators
+                .audit
+                .record(&p.user.username, "remote.start", node, "requested")?;
+        }
         entries.insert(
             id,
             Arc::new(Entry {
                 info: info.clone(),
                 owner: p.session_key,
                 agent_ticket: sha256(ticket.as_bytes()),
+                bridge_ticket: bridge_ticket
+                    .as_ref()
+                    .map(|ticket| sha256(ticket.as_bytes())),
                 deadline: Instant::now() + Duration::from_secs(3600),
-                attach_deadline: Instant::now() + Duration::from_secs(30),
+                attach_deadline: Instant::now()
+                    + if forwarding {
+                        FORWARD_ATTACH
+                    } else {
+                        Duration::from_secs(30)
+                    },
                 closed: AtomicBool::new(false),
                 ready: Notify::new(),
                 sides: Mutex::new(Sides {
@@ -181,7 +251,7 @@ impl Hub {
                 audit: operators.audit.clone(),
             }),
         );
-        Ok((info, ticket))
+        Ok((info, ticket, bridge_ticket))
     }
     fn close(&self, id: &str) {
         if let Some(entry) = self
@@ -310,7 +380,7 @@ async fn relay(
         hub,
         id: entry.info.id.clone(),
     };
-    let paired = timeout(Duration::from_secs(30), async {
+    let paired = timeout_at(entry.attach_deadline, async {
         loop {
             let notified = entry.ready.notified();
             if entry.closed.load(Ordering::Acquire) || !entry.operators.active(&entry.owner) {
@@ -344,16 +414,21 @@ async fn relay(
             return;
         }
     } else {
-        for message in [
-            Message::Text("c".into()),
-            Message::Text(
+        if socket.send(Message::Text("c".into())).await.is_err() {
+            return;
+        }
+        if let Some(protocol) = entry.info.kind.protocol() {
+            let options = Message::Text(
                 json!({"ctrlChannel":"102938","type":"options","cols":100,"rows":30})
                     .to_string()
                     .into(),
-            ),
-            Message::Text(entry.info.kind.protocol().to_string().into()),
-        ] {
-            if socket.send(message).await.is_err() {
+            );
+            if socket.send(options).await.is_err()
+                || socket
+                    .send(Message::Text(protocol.to_string().into()))
+                    .await
+                    .is_err()
+            {
                 return;
             }
         }
@@ -372,6 +447,7 @@ async fn relay(
                 let sent=tokio::select!{_=entry.ready.notified()=>false,result=timeout(Duration::from_secs(2),socket.send(message))=>matches!(result,Ok(Ok(())))};
                 if !sent {break;}}
          message=socket.recv()=>{match message{Some(Ok(Message::Ping(bytes)))=>{if socket.send(Message::Pong(bytes)).await.is_err(){break;}},Some(Ok(Message::Pong(_)))=>{},Some(Ok(Message::Close(_)))|Some(Err(_))|None=>break,Some(Ok(message))=>{if entry.closed.load(Ordering::Acquire)||!entry.operators.active(&entry.owner){break;}
+                if entry.info.kind.protocol().is_none() && !matches!(&message, Message::Binary(bytes) if entry.info.kind != Kind::Udp || (!bytes.is_empty() && bytes.len() <= UDP_LIMIT)) { break; }
                 let sent=tokio::select!{_=entry.ready.notified()=>false,result=timeout(Duration::from_secs(10),destination.send(message))=>matches!(result,Ok(Ok(())))};
                 if !sent {break;}}}}
         }
@@ -382,13 +458,10 @@ async fn relay(
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/devices/{id}/sessions", post(start))
+        .route("/v1/devices/{id}/forward-routes", get(forward_routes))
         .route("/v1/sessions", get(sessions))
         .route("/v1/sessions/{id}", delete(stop))
         .route("/v1/sessions/{id}/socket", get(browser_socket))
-}
-#[derive(Deserialize)]
-struct Start {
-    kind: Kind,
 }
 async fn start(
     State(s): State<AppState>,
@@ -410,18 +483,64 @@ async fn start(
         ));
     }
     let operators = crate::console::operators(&s)?;
-    let (info, ticket) = rt
+    let mut target = RelayTarget {
+        kind: body.kind,
+        port: body.port,
+        address: Ipv4Addr::LOCALHOST,
+    };
+    if let Some(name) = body.route {
+        if body.port.is_some() || body.kind.protocol().is_some() {
+            return Err(bad(
+                "Use a route or a local port for the selected protocol.",
+            ));
+        }
+        let route = rt
+            .forward_routes
+            .iter()
+            .find(|route| {
+                route.name == name && route.kind == body.kind && route.in_group(&device.group_id)
+            })
+            .ok_or_else(forbidden)?;
+        target.port = Some(route.port);
+        target.address = route.address;
+    }
+    let (info, ticket, bridge_token) = rt
         .relays
-        .create(&p, &id, body.kind, operators, rt.registry.clone())
+        .create(&p, &id, target, operators, rt.registry.clone())
         .map_err(bad)?;
-    let message = json!({"action":"msg","type":"tunnel","value":format!("*/meshrelay.ashx?auth={ticket}"),"rights":24,"consent":0,"userid":format!("user//{}",p.user.username),"username":p.user.username,"realname":p.user.username,"sessionid":info.id,"servertlshash":crate::identity::hex(&rt.identity.web_hash),"soptions":{"usages":[body.kind.protocol()]}});
-    if let Err(error) = rt.command(&id, message) {
+    let mut message = json!({"action":"msg","type":"tunnel","value":format!("*/meshrelay.ashx?auth={ticket}"),"rights":24,"consent":0,"userid":format!("user//{}",p.user.username),"username":p.user.username,"realname":p.user.username,"sessionid":info.id,"servertlshash":crate::identity::hex(&rt.identity.web_hash),"soptions":{}});
+    if let Some(protocol) = info.kind.protocol() {
+        message["soptions"]["usages"] = json!([protocol]);
+    } else if info.kind == Kind::Tcp {
+        message["tcpport"] = json!(info.target_port);
+        message["tcpaddr"] = json!(target.address);
+    } else {
+        message["udpport"] = json!(info.target_port);
+        message["udpaddr"] = json!(target.address);
+    }
+    if let Err(error) = rt.command(&id, &device.group_id, message) {
         rt.relays.close(&info.id);
         return Err(bad(error));
     }
-    Ok(Json(
-        json!({"session":info,"socket_path":format!("/api/v1/sessions/{}/socket",info.id)}),
-    ))
+    Ok(Json(if let Some(token) = bridge_token {
+        json!({"session": info, "socket_path": format!("/api/v1/forward/{}", info.id), "bridge_token": token})
+    } else {
+        json!({"session": info, "socket_path": format!("/api/v1/sessions/{}/socket", info.id)})
+    }))
+}
+async fn forward_routes(
+    State(s): State<AppState>,
+    Extension(p): Extension<Principal>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let rt = management::runtime(&s)?;
+    let device = management::authorized_device(&rt, &p, &id, true)?;
+    Ok(Json(json!(
+        rt.forward_routes
+            .iter()
+            .filter(|route| route.in_group(&device.group_id))
+            .collect::<Vec<_>>()
+    )))
 }
 async fn sessions(
     State(s): State<AppState>,
@@ -461,12 +580,50 @@ async fn browser_socket(
     }
     let rt = management::runtime(&s)?;
     let entry = rt.relays.browser_entry(&id, &p).map_err(|_| forbidden())?;
+    if entry.bridge_ticket.is_some() {
+        return Err(forbidden());
+    }
     management::authorized_device(&rt, &p, &entry.info.node_id, true)?;
     let receiver = claim(&entry, true).map_err(bad)?;
     let hub = rt.relays.clone();
     Ok(ws
         .max_message_size(1024 * 1024)
         .max_frame_size(1024 * 1024)
+        .on_upgrade(move |socket| relay(socket, entry, receiver, true, hub))
+        .into_response())
+}
+
+pub(crate) async fn bridge_socket(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> ApiResult<Response> {
+    if headers.contains_key(header::ORIGIN) {
+        return Err(forbidden());
+    }
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|token| token.len() == 43)
+        .ok_or_else(forbidden)?;
+    let rt = management::runtime(&s)?;
+    let entry = rt.relays.get(&id).ok_or_else(forbidden)?;
+    let expected = entry.bridge_ticket.as_ref().ok_or_else(forbidden)?;
+    if !openssl::memcmp::eq(&sha256(token.as_bytes()), expected) {
+        return Err(forbidden());
+    }
+    let receiver = claim(&entry, true).map_err(|_| forbidden())?;
+    let hub = rt.relays.clone();
+    let limit = if entry.info.kind == Kind::Udp {
+        UDP_LIMIT
+    } else {
+        TCP_FRAME_LIMIT
+    };
+    Ok(ws
+        .max_message_size(limit)
+        .max_frame_size(limit)
         .on_upgrade(move |socket| relay(socket, entry, receiver, true, hub))
         .into_response())
 }
@@ -546,7 +703,7 @@ mod tests {
     async fn relay_tickets_and_each_side_are_single_use() {
         let f = fixture().await;
         let hub = Hub::default();
-        let (info, ticket) = hub
+        let (info, ticket, _) = hub
             .create(
                 &f.owner,
                 "test-node",
@@ -569,7 +726,7 @@ mod tests {
     async fn a_second_sign_in_cannot_hijack_a_browser_relay() {
         let f = fixture().await;
         let hub = Hub::default();
-        let (info, _) = hub
+        let (info, _, _) = hub
             .create(
                 &f.owner,
                 "test-node",
@@ -626,7 +783,7 @@ mod tests {
     async fn logout_revokes_pending_relay_attachment() {
         let f = fixture().await;
         let hub = Hub::default();
-        let (info, ticket) = hub
+        let (info, ticket, _) = hub
             .create(
                 &f.owner,
                 "test-node",
@@ -645,7 +802,7 @@ mod tests {
     async fn pending_relays_expire_and_device_disconnect_closes_every_session() {
         let f = fixture().await;
         let hub = Hub::default();
-        let (info, ticket) = hub
+        let (info, ticket, _) = hub
             .create(
                 &f.owner,
                 "test-node",

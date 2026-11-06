@@ -16,8 +16,11 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
-    let config = Config::from_env().map_err(anyhow::Error::msg)?;
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|argument| argument == "forward") {
+        return meshcentral_server::forward::run(&args[1..]).await;
+    }
+    let config = Config::from_env().map_err(anyhow::Error::msg)?;
     if !args.is_empty() {
         if (args.len() == 2 && args[0] == "backup") || (args.len() == 3 && args[0] == "restore") {
             use std::io::Read;
@@ -62,7 +65,7 @@ async fn main() -> Result<()> {
         }
         ensure!(
             args.len() == 3 && args[0] == "init-lab",
-            "usage: meshcentral-server [init-user USERNAME | init-lab NODE_ID_HEX AGENT_MSH_PATH | backup ARCHIVE | restore ARCHIVE NEW_DATA_DIR]"
+            "usage: meshcentral-server [init-user USERNAME | init-lab NODE_ID_HEX AGENT_MSH_PATH | backup ARCHIVE | restore ARCHIVE NEW_DATA_DIR | forward tcp|udp WEBSOCKET_URL [LOCAL_PORT]]"
         );
         initialize_lab(&config, &args[1], Path::new(&args[2]))?;
         println!(

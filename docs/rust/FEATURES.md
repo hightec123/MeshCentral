@@ -30,7 +30,9 @@ upstream source alone does not imply support in the Rust server.
 | Single-device shell scripts | Verified with stock macOS and Linux lab agents; device-group access, bounded output, exit codes and audit history |
 | Scheduled shell scripts | One-time and daily single-device tasks verified with stock macOS and Linux lab agents |
 | Fleet shell tasks | Schedule up to eight selected devices with atomic batch creation and per-device access checks; both labs verified the picker, and Linux verified independent online and offline outcomes |
-| TCP/UDP forwarding, routing and WebRTC | Planned |
+| TCP/UDP forwarding | Verified on stock macOS and Linux agents with the Rust loopback client, datagram boundary checks and logout cleanup |
+| Named private IPv4 routes | Verified for TCP and UDP through a stock Linux agent to an isolated network namespace; routes are scoped to a device group |
+| WebRTC | Planned |
 | Encrypted offline backups and restore | Implemented; pinned identity/accounts/metadata retained, live presence/sessions reset, wrong password/tampering/overwrite/active-state refusals tested; see [RECOVERY.md](RECOVERY.md) |
 | Multitenancy, database backends and operational tooling | Planned; scheduled backup/retention and fleet-scale recovery remain outstanding |
 
@@ -41,8 +43,7 @@ Admission supports up to 64 groups and 32 approved agent identities per group;
 the native listener allows 32 sockets and eight concurrent handshakes.
 
 Windows live acceptance is pending a disposable lab VM (none is currently
-available). Next implementation targets include TCP/UDP forwarding,
-routing and WebRTC. Existing agent trust/database migration and
+available). WebRTC is the next connectivity item. Existing agent trust/database migration and
 production rollout remain separate release gates.
 See [AUTH.md](AUTH.md) for the auth boundary, migration, logout and recovery behavior.
 

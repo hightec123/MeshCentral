@@ -15,6 +15,8 @@ type Session = {
   node_id: string;
   username: string;
   kind: string;
+  target_port?: number;
+  target_address?: string;
   started_at: string;
 };
 type Audit = {
@@ -354,7 +356,7 @@ export function ManagementPage({ section }: { section: string }) {
               {sessions.map((session) => (
                 <tr key={session.id}>
                   <td>{session.username}</td>
-                  <td>{session.kind}</td>
+                  <td>{session.target_port ? `${session.kind.toUpperCase()} · ${session.target_address}:${session.target_port}` : session.kind}</td>
                   <td>{new Date(session.started_at).toLocaleString()}</td>
                   <td>
                     <button

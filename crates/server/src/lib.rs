@@ -6,6 +6,8 @@ pub mod backup;
 pub mod console;
 pub mod core;
 pub mod dashboard_auth;
+pub mod forward;
+mod forward_routes;
 pub mod identity;
 pub mod management;
 pub mod operators;
@@ -219,6 +221,7 @@ pub fn app_with_console_origin(
         ));
     let api = Router::new()
         .route("/v1/server", get(server_info))
+        .route("/v1/forward/{id}", get(remote::bridge_socket))
         .merge(console::public_routes())
         .merge(console::protected_routes(state.clone()))
         .merge(protected)

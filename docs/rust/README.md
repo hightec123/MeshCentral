@@ -104,6 +104,44 @@ The equivalent API is `POST /api/v1/schedules` with a `devices` array of device
 IDs and a `task` object using the same fields as a single-device request.
 `GET /api/v1/schedules` lists the caller's visible tasks with their device IDs.
 
+Open **Forwarding** on an online device to connect a local application to a
+TCP or UDP port on that agent. Select a protocol and destination, then select
+**Prepare forward**. Run the displayed `meshcentral-server forward` command
+with your built binary and paste the bridge token when prompted. Point the application at the
+`127.0.0.1` port the command prints. Append a port number to the command
+to request a particular local port. The console can close the forward from
+**Sessions**. Signing out also closes it.
+
+Each forward serves one TCP connection or one UDP peer. UDP preserves datagrams
+of 1–4,095 bytes. A TCP forward closes with its stream. Bridge credentials
+attach once and expire after two minutes. For HTTPS consoles with a private
+CA, set `MCR_FORWARD_CA` to the PEM CA file before running the client.
+
+To offer a named route, add it to `forward-routes.json` in the server's
+private data directory with mode 0600, then restart Rust. Each record names
+one device group, protocol, private IPv4 address and port. Devices in the
+group must be able to reach that address. For example:
+
+```json
+[
+  {
+    "name": "printer-status",
+    "group_id": "<96 hex characters from the device group>",
+    "kind": "tcp",
+    "address": "192.168.20.40",
+    "port": 9100
+  }
+]
+```
+
+The protected `POST /api/v1/devices/{id}/sessions` endpoint takes
+`{"kind":"tcp","port":9100}` for agent loopback or
+`{"kind":"tcp","route":"printer-status"}` for a named route. The returned
+socket path accepts binary frames through an `Authorization: Bearer` header
+using the single-use `bridge_token`. The first server frame confirms the
+protocol. TCP frames carry stream chunks and each UDP frame carries one
+datagram.
+
 For frontend hot reload, keep the Rust process running and use another terminal:
 
 ```sh

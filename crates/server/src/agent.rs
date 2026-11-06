@@ -38,6 +38,7 @@ pub struct AgentRuntime {
     pub cores: crate::core::Cores,
     pub audit: RwLock<Option<Arc<crate::operators::Audit>>>,
     pub relays: Arc<crate::remote::Hub>,
+    pub(crate) forward_routes: Vec<crate::forward_routes::ForwardRoute>,
     commands: Mutex<BTreeMap<String, AgentControl>>,
     sockets: Arc<Semaphore>,
     handshakes: Arc<Semaphore>,
@@ -75,13 +76,15 @@ impl AgentRuntime {
             audit: RwLock::new(None),
             commands: Mutex::new(BTreeMap::new()),
             relays: Arc::new(crate::remote::Hub::default()),
+            forward_routes: crate::forward_routes::load(directory)?,
         }))
     }
-    pub fn command(&self, id: &str, message: Value) -> Result<()> {
+    pub(crate) fn command(&self, id: &str, group: &str, message: Value) -> Result<()> {
         self.commands
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(id)
+            .filter(|agent| agent.group == group)
             .ok_or_else(|| anyhow::anyhow!("device is offline"))?
             .messages
             .try_send(message)
