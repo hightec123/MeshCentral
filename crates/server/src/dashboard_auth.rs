@@ -207,6 +207,11 @@ impl DashboardAuth {
             "revoke-session",
             "revoke-sessions",
             "revoke-other-sessions",
+            "two-factor/enable",
+            "two-factor/disable",
+            "two-factor/verify-totp",
+            "two-factor/verify-backup-code",
+            "two-factor/generate-backup-codes",
         ];
         ensure!(
             allowed.contains(&path),

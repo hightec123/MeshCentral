@@ -16,6 +16,7 @@ type Authentication = {
   user: Operator;
   csrf: string;
   logout: () => Promise<void>;
+  refreshSession: () => Promise<void>;
 };
 const Context = createContext<Authentication | null>(null);
 export function useAuth() {
@@ -58,7 +59,24 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [error, setError] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [challenge, setChallenge] = useState(false);
+  const [recovery, setRecovery] = useState(false);
+  const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
+  const readSession = useCallback(async () => {
+    const result = await api<{ user: Operator | null; csrf: string }>(
+      "/auth/session",
+      "",
+    );
+    setAuth(result.user ? { user: result.user, csrf: result.csrf } : null);
+    return Boolean(result.user);
+  }, []);
+  const refreshSession = useCallback(async () => {
+    await readSession();
+    const channel = new BroadcastChannel("meshcentral-dashboard-auth");
+    channel.postMessage("session-changed");
+    channel.close();
+  }, [readSession]);
   useEffect(() => {
     const controller = new AbortController();
     fetch("/api/v1/auth/session", {
@@ -88,6 +106,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       if (event.data === "revoking")
         window.dispatchEvent(new Event("mcr-auth-revoking"));
       if (event.data === "signed-out") signout();
+      if (event.data === "session-changed") void readSession().catch(signout);
     };
     window.addEventListener("mcr-signout", signout);
     return () => {
@@ -95,7 +114,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       window.removeEventListener("mcr-signout", signout);
       channel.close();
     };
-  }, []);
+  }, [readSession]);
   const logout = useCallback(async () => {
     window.dispatchEvent(new Event("mcr-auth-revoking"));
     const channel = new BroadcastChannel("meshcentral-dashboard-auth");
@@ -118,21 +137,54 @@ export function AuthGate({ children }: { children: ReactNode }) {
     setBusy(true);
     setError("");
     try {
-      const signedIn = await authClient.signIn.username({ username, password });
-      if (signedIn.error)
-        throw new Error(
-          "Sign-in failed. Check your credentials or retry shortly.",
-        );
-      const result = await api<{ user: Operator | null; csrf: string }>(
-        "/auth/session",
-        "",
-      );
-      if (!result.user)
+      if (challenge) {
+        const result = recovery
+          ? await authClient.twoFactor.verifyBackupCode({ code: code.trim() })
+          : await authClient.twoFactor.verifyTotp({ code: code.trim() });
+        if (result.error)
+          throw new Error(
+            "Verification failed. Check the code or start sign-in again.",
+          );
+      } else {
+        const signedIn = await authClient.signIn.username({
+          username,
+          password,
+        });
+        if (signedIn.error)
+          throw new Error(
+            "Sign-in failed. Check your credentials or retry shortly.",
+          );
+        setPassword("");
+        if (
+          signedIn.data &&
+          "twoFactorRedirect" in signedIn.data &&
+          signedIn.data.twoFactorRedirect
+        ) {
+          setChallenge(true);
+          return;
+        }
+      }
+      if (!(await readSession()))
         throw new Error("This account does not have dashboard access.");
-      setAuth({ user: result.user, csrf: result.csrf });
-      setPassword("");
+      setChallenge(false);
+      setRecovery(false);
+      setCode("");
     } catch (error) {
       setError(error instanceof Error ? error.message : "Sign-in failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function cancelChallenge() {
+    setBusy(true);
+    try {
+      if ((await authClient.signOut()).error) throw new Error();
+      setChallenge(false);
+      setRecovery(false);
+      setCode("");
+      setError("");
+    } catch {
+      setError("Could not cancel this sign-in. Retry shortly.");
     } finally {
       setBusy(false);
     }
@@ -145,7 +197,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
     );
   if (auth)
     return (
-      <Context.Provider value={{ ...auth, logout }}>
+      <Context.Provider value={{ ...auth, logout, refreshSession }}>
         {children}
       </Context.Provider>
     );
@@ -154,12 +206,20 @@ export function AuthGate({ children }: { children: ReactNode }) {
       <section className="auth-card">
         <div className="auth-brand">MeshCentral</div>
         <h1>
-          {setup ? "Set up your administrator" : "Sign in to your workspace"}
+          {setup
+            ? "Set up your administrator"
+            : challenge
+              ? "Verify your sign-in"
+              : "Sign in to your workspace"}
         </h1>
         <p>
           {setup
             ? "Create the first administrator from the server terminal. Passwords are read from standard input."
-            : "Manage your devices with your operator account."}
+            : challenge
+              ? recovery
+                ? "Enter one of your unused recovery codes."
+                : "Enter the current code from your authenticator app."
+              : "Manage your devices with your operator account."}
         </p>
         {error && (
           <p className="form-error" role="alert">
@@ -168,6 +228,48 @@ export function AuthGate({ children }: { children: ReactNode }) {
         )}
         {setup ? (
           <code>meshcentral-server init-user USERNAME</code>
+        ) : challenge ? (
+          <form onSubmit={login}>
+            <label>
+              {recovery ? "Recovery code" : "Authenticator code"}
+              <input
+                key={String(recovery)}
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                inputMode={recovery ? "text" : "numeric"}
+                autoComplete="one-time-code"
+                autoCapitalize="none"
+                spellCheck={false}
+                pattern={recovery ? undefined : "[0-9]{6}"}
+                maxLength={recovery ? 32 : 6}
+                required
+                autoFocus
+              />
+            </label>
+            <button className="button primary" disabled={busy}>
+              {busy ? "Verifying…" : "Verify"}
+            </button>
+            <button
+              className="button"
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setRecovery(!recovery);
+                setCode("");
+                setError("");
+              }}
+            >
+              {recovery ? "Use an authenticator code" : "Use a recovery code"}
+            </button>
+            <button
+              className="button"
+              type="button"
+              disabled={busy}
+              onClick={() => void cancelChallenge()}
+            >
+              Back to sign-in
+            </button>
+          </form>
         ) : (
           <form onSubmit={login}>
             <label>

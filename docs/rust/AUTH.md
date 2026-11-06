@@ -1,4 +1,4 @@
-# Dashboard authentication — version 0.4.0
+# Dashboard authentication
 
 Dashboard users sign in through Better Auth 1.7.16 and its official React client.
 The Rust process starts and supervises a private Bun service. Rust still owns
@@ -30,15 +30,32 @@ cargo run --locked -p meshcentral-server -- init-user admin < /path/to/private-p
 ```
 
 The password file must be private (0600), contain 12–128 bytes, and is read through
-standard input. There is no public sign-up route. Username/password login is
-enabled; MFA, passkeys, email recovery and SSO are not enabled by this integration.
+standard input. Accounts are provisioned by an administrator. Username/password
+login supports opt-in authenticator-app MFA and single-use recovery codes.
+
+## Enable two-factor authentication
+
+1. Open **Account** and enter your current password under **Two-factor
+   authentication**.
+2. Select **Set up authenticator**. Scan the QR code with your authenticator app
+   or enter the setup key manually.
+3. Enter the app's six-digit code and save the recovery codes. Each works once.
+   Use **Replace recovery codes** while signed in to invalidate the previous set.
+
+The QR code is generated in your browser. Enabling or disabling MFA rotates the
+current dashboard cookie, revokes all previous cookies for the account, and
+closes the remote sessions they own. Other operators keep their own sign-ins.
+At sign-in, use the current authenticator code or an unused recovery code.
+The password step grants a five-minute challenge. Rust grants device access
+after the second factor establishes a dashboard session. Trusted-device
+exceptions are disabled.
 
 ## Boundaries
 
 | Component | Owns |
 | --- | --- |
 | React/Vite | Better Auth username sign-in/sign-out client; Rust permissions/session view; cross-tab sign-out UI |
-| Private Better Auth/Bun service | Argon2id credential verification, opaque signed-cookie sessions, session database and revocation |
+| Private Better Auth/Bun service | Argon2id credential verification, authenticator challenges and recovery codes, opaque signed-cookie sessions and revocation |
 | Rust dashboard bridge | Live session validation, identity-to-permission mapping, CSRF protection, logout relay closure and fail-closed behavior |
 | Rust native agent listener | Existing certificate proof, TLS/server pins, node/group admission and agent presence; dashboard logout does not disconnect the agent |
 
@@ -56,6 +73,10 @@ different Better Auth ID does not inherit access. Legacy Rust session cookies ar
 not accepted by the configured dashboard. `/api/v1/auth/login` remains a
 compatibility endpoint that delegates to Better Auth and returns the Rust
 permission/CSRF view; it does not verify passwords independently.
+For an MFA account it returns HTTP 202 with `twoFactorRedirect: true` and the
+challenge cookie. Continue with `POST /api/auth/two-factor/verify-totp` or
+`POST /api/auth/two-factor/verify-backup-code`, then read
+`GET /api/v1/auth/session` with the new session cookie for Rust permissions and CSRF.
 
 ## Logout and revocation
 
@@ -98,7 +119,7 @@ No database, credential or signing secret is committed.
 | --- | --- |
 | `operators.json` | Rust roles/group grants and immutable Better Auth user IDs |
 | `dashboard-auth.json` | Signing/service secrets and a per-instance cookie prefix |
-| `dashboard-auth.sqlite` | Better Auth users, credential hashes and sessions; DELETE journal mode with full synchronous writes |
+| `dashboard-auth.sqlite` | Better Auth users, credential hashes, sessions, and encrypted authenticator secrets and recovery codes |
 
 The encrypted [backup/restore workflow](RECOVERY.md) includes both auth files and
 keeps the original credentials/mappings. Database backups require a stopped server
@@ -106,6 +127,8 @@ and no active/recovery journal. JSON files retain a 1 MiB limit; the auth databa
 is bounded at 4 MiB and the encrypted archive at 8 MiB. Version 0.3.0 snapshots can
 still be restored and are imported on startup; older binaries cannot restore the
 new auth state. Databases and secrets must be recovered together.
+Use an MFA-capable build when restoring a database with enrolled accounts.
+An older build lacks the MFA plugin and can accept their passwords alone.
 
 Configuration: `MCR_BUN` selects the Bun executable and `MCR_AUTH_ENTRY` can select
 the service entry file for packaged builds. Defaults use `bun` on PATH and this
@@ -130,4 +153,5 @@ outside React's lifecycle, then confirms each agent remains online.
 
 Reference: [Better Auth installation](https://better-auth.com/docs/installation),
 [username plugin](https://better-auth.com/docs/plugins/username),
+[two-factor plugin](https://better-auth.com/docs/plugins/2fa),
 [session management](https://better-auth.com/docs/concepts/session-management).

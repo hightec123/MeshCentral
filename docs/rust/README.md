@@ -162,6 +162,10 @@ vendored OpenSSL build. The new server does not depend on the upstream
 Node.js device server at runtime. Rust supervises the private Bun/Better Auth
 dashboard service; Node.js builds the frontend and regenerates fixtures.
 The public API, static assets, device protocol and native TLS relays run in Rust.
+The fork retains the upstream Node.js server as a reference while we close the
+compatibility ledger. The eventual runnable distribution can omit that server
+and retain the upstream agent binaries, management cores and browser protocol
+assets the Rust stack still uses.
 
 ## Fork provenance
 

@@ -19,7 +19,8 @@ upstream source alone does not imply support in the Rust server.
 | Legacy PKCS#7 signatures | Bounded single-signer Windows CryptoAPI format implemented; cryptographic binding/replay and malformed-envelope tests pass; Windows live acceptance pending |
 | Multi-platform compatibility | macOS ARM64 and Linux ARM64 accepted; Windows pending an available disposable lab VM |
 | Agent packaging, binary updates and production migration | Planned |
-| MFA/WebAuthn, SSO, recovery email, invitations, production HTTPS | Planned |
+| Authenticator-app MFA and recovery codes | Implemented; verified dashboard enrollment, password-only API denial, prior-session revocation and single-use codes |
+| Passkeys/WebAuthn, SSO, recovery email, invitations, production HTTPS | Planned |
 | Intel AMT/CIRA, Wake-on-LAN, power control | Planned |
 | Sharing, consent, session recording, chat and notifications | Planned |
 | Tasks, scripting, TCP/UDP forwarding, routing and WebRTC | Planned |
@@ -33,7 +34,7 @@ Admission supports up to 64 groups and 32 approved agent identities per group;
 the native listener allows 32 sockets and eight concurrent handshakes.
 
 Windows live acceptance is pending a disposable lab VM (none is currently
-available). Next independent implementation targets are MFA/account recovery,
+available). Next independent implementation targets are passkeys, email recovery,
 HTTPS deployment support, and scoped automation/advanced connectivity. Existing
 agent trust/database migration and production rollout remain separate release gates.
 See [AUTH.md](AUTH.md) for the auth boundary, migration, logout and recovery behavior.

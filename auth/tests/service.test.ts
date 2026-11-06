@@ -2,6 +2,8 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { base32 } from "@better-auth/utils/base32";
+import { createOTP } from "@better-auth/utils/otp";
 const directory = mkdtempSync(join(tmpdir(), "mcr-auth-test-"));
 chmodSync(directory, 0o700);
 const secret = crypto.randomUUID() + crypto.randomUUID();
@@ -36,6 +38,12 @@ async function request(path: string, body?: unknown, cookie?: string) {
     },
     body: body ? JSON.stringify(body) : undefined,
   });
+}
+function cookies(reply: Response) {
+  return reply.headers
+    .getSetCookie()
+    .map((value) => value.split(";")[0])
+    .join("; ");
 }
 beforeAll(async () => {
   child = Bun.spawn(["bun", join(import.meta.dir, "../src/service.ts")], {
@@ -162,4 +170,79 @@ test("password reset revokes every session of the provisioned identity", async (
       })
     ).ok,
   ).toBe(true);
+});
+
+test("MFA enrollment rotates sessions, gates password login, and consumes recovery codes", async () => {
+  const username = "mfa-operator";
+  const password = "mfa-password-123";
+  const credentials = { username, password };
+  const { user_id } = await (await internal("identity", credentials)).json();
+  const signIn = () => request("sign-in/username", credentials);
+  const readSession = async (cookie: string) =>
+    (await internal("session", { cookie })).json();
+  const enrolling = cookies(await signIn());
+  const old = cookies(await signIn());
+  expect((await readSession(old)).user_id).toBe(user_id);
+  const setup = await request("two-factor/enable", { password }, enrolling);
+  expect(setup.status).toBe(200);
+  expect(setup.headers.get("cache-control")).toBe("no-store");
+  const { totpURI, backupCodes } = await setup.json();
+  const key = new URL(totpURI).searchParams.get("secret")!;
+  const totp = createOTP(base32.decode(key));
+  const enrollmentCode = await totp.totp();
+  const [concurrentLogin, confirm] = await Promise.all([
+    signIn(),
+    request("two-factor/verify-totp", { code: enrollmentCode }, enrolling),
+  ]);
+  expect(concurrentLogin.status).toBe(200);
+  expect(confirm.status).toBe(200);
+  const confirmed = cookies(confirm);
+  expect((await readSession(confirmed)).user_id).toBe(user_id);
+  expect(await readSession(enrolling)).toBeNull();
+  expect(await readSession(old)).toBeNull();
+  expect(await readSession(cookies(concurrentLogin))).toBeNull();
+
+  const challenge = await signIn();
+  expect(await challenge.json()).toMatchObject({ twoFactorRedirect: true });
+  const pending = cookies(challenge);
+  expect(await readSession(pending)).toBeNull();
+  expect((await request("two-factor/disable", { password }, pending)).ok).toBe(
+    false,
+  );
+  const verified = await request(
+    "two-factor/verify-totp",
+    { code: await totp.totp(), trustDevice: true },
+    pending,
+  );
+  expect(verified.status).toBe(200);
+  expect(cookies(verified)).not.toContain("trust_device");
+  expect((await readSession(cookies(verified))).user_id).toBe(user_id);
+
+  const cancelled = cookies(await signIn());
+  expect((await request("sign-out", {}, cancelled)).ok).toBe(true);
+  const recovery = { code: backupCodes[0] };
+  expect(
+    (await request("two-factor/verify-backup-code", recovery, cancelled)).ok,
+  ).toBe(false);
+  const recovered = await request(
+    "two-factor/verify-backup-code",
+    recovery,
+    cookies(await signIn()),
+  );
+  expect(recovered.status).toBe(200);
+  expect((await readSession(cookies(recovered))).user_id).toBe(user_id);
+  expect(
+    (
+      await request(
+        "two-factor/verify-backup-code",
+        recovery,
+        cookies(await signIn()),
+      )
+    ).ok,
+  ).toBe(false);
+
+  const disable = await request("two-factor/disable", { password }, confirmed);
+  expect(disable.status).toBe(200);
+  expect(await readSession(cookies(recovered))).toBeNull();
+  expect((await readSession(cookies(await signIn()))).user_id).toBe(user_id);
 });

@@ -169,17 +169,12 @@ async fn login(
             )
             .await
             .map_err(|_| auth_unavailable())?;
-        if reply.status.is_success() {
-            let cookie = reply
-                .headers
-                .get_all("set-cookie")
-                .iter()
-                .filter_map(|value| value.to_str().ok())
-                .filter_map(|value| value.split(';').next())
-                .collect::<Vec<_>>()
-                .join("; ");
+        let challenge = is_mfa_challenge(&reply);
+        if challenge {
+            reply.status = StatusCode::ACCEPTED;
+        } else if reply.status.is_success() {
             let principal = store
-                .dashboard_principal(&cookie)
+                .dashboard_principal(&reply_cookie(&reply))
                 .await
                 .map_err(|_| auth_unavailable())?
                 .ok_or_else(forbidden)?;
@@ -192,7 +187,9 @@ async fn login(
             &body.username,
             "account.login",
             "",
-            if reply.status.is_success() {
+            if challenge {
+                "challenge"
+            } else if reply.status.is_success() {
                 "success"
             } else {
                 "denied"
@@ -333,6 +330,21 @@ fn auth_unavailable() -> ApiFailure {
 fn reply_response(reply: crate::dashboard_auth::Reply) -> Response {
     (reply.status, reply.headers, reply.body).into_response()
 }
+fn reply_cookie(reply: &crate::dashboard_auth::Reply) -> String {
+    reply
+        .headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|value| value.split(';').next())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+fn is_mfa_challenge(reply: &crate::dashboard_auth::Reply) -> bool {
+    reply.status.is_success()
+        && serde_json::from_slice::<serde_json::Value>(&reply.body)
+            .is_ok_and(|value| value["twoFactorRedirect"] == true)
+}
 async fn auth_proxy(
     State(state): State<AppState>,
     Path(path): Path<String>,
@@ -361,6 +373,11 @@ async fn proxy(
         "revoke-session",
         "revoke-sessions",
         "revoke-other-sessions",
+        "two-factor/enable",
+        "two-factor/disable",
+        "two-factor/verify-totp",
+        "two-factor/verify-backup-code",
+        "two-factor/generate-backup-codes",
     ]
     .contains(&path)
     {
@@ -374,6 +391,14 @@ async fn proxy(
     }
     let store = operators(state)?;
     let auth = store.auth().ok_or_else(auth_unavailable)?;
+    let mfa_settings = matches!(
+        path,
+        "two-factor/enable" | "two-factor/disable" | "two-factor/generate-backup-codes"
+    );
+    let mfa_verify = matches!(
+        path,
+        "two-factor/verify-totp" | "two-factor/verify-backup-code"
+    );
     let mutation = [
         "sign-out",
         "change-password",
@@ -382,10 +407,17 @@ async fn proxy(
         "revoke-other-sessions",
     ]
     .contains(&path);
-    if (mutation && method != "POST") || (!mutation && !["GET", "POST"].contains(&method)) {
+    if !["GET", "POST"].contains(&method)
+        || ((mutation || mfa_settings || mfa_verify) && method != "POST")
+    {
         return Err(bad("Unsupported auth method."));
     }
-    let principal = if mutation {
+    let principal = if mfa_settings || mfa_verify {
+        store
+            .dashboard_principal(cookie(headers))
+            .await
+            .map_err(|_| auth_unavailable())?
+    } else if mutation {
         store
             .dashboard_principal(cookie(headers))
             .await
@@ -395,6 +427,9 @@ async fn proxy(
     } else {
         None
     };
+    if mfa_settings && principal.is_none() {
+        return Err(unauthorized());
+    }
     if path == "sign-out"
         && let Some(p) = &principal
     {
@@ -418,7 +453,7 @@ async fn proxy(
         .request(path, method, headers, body.clone())
         .await
         .map_err(|_| auth_unavailable())?;
-    if reply.status.is_success() && mutation {
+    if reply.status.is_success() && (mutation || mfa_settings || mfa_verify) {
         if path == "change-password"
             && let Some(p) = &principal
         {
@@ -435,9 +470,40 @@ async fn proxy(
                 .audit
                 .record(&p.user.username, "account.password", "", "success");
         }
-        store.revalidate_dashboard_sessions().await;
-        if let Some(rt) = &state.runtime {
-            rt.relays.close_inactive(&store);
+        let rotated_mfa_session = path == "two-factor/disable"
+            || (path == "two-factor/verify-totp"
+                && principal.is_some()
+                && reply.headers.contains_key(header::SET_COOKIE));
+        if mutation || rotated_mfa_session {
+            store.revalidate_dashboard_sessions().await;
+            if let Some(rt) = &state.runtime {
+                rt.relays.close_inactive(&store);
+            }
+        }
+        let action = match path {
+            "two-factor/disable" => Some("account.mfa.disable"),
+            "two-factor/generate-backup-codes" => Some("account.mfa.recovery-codes"),
+            "two-factor/verify-totp" if !reply_cookie(&reply).is_empty() => {
+                Some("account.mfa.verify")
+            }
+            "two-factor/verify-backup-code" if !reply_cookie(&reply).is_empty() => {
+                Some("account.mfa.recovery")
+            }
+            _ => None,
+        };
+        if let Some(action) = action {
+            let verified = if principal.is_some() {
+                principal
+            } else {
+                store
+                    .dashboard_principal(&reply_cookie(&reply))
+                    .await
+                    .ok()
+                    .flatten()
+            };
+            if let Some(p) = verified {
+                let _ = store.audit.record(&p.user.username, action, "", "success");
+            }
         }
     }
     if path == "sign-in/username" {
@@ -449,7 +515,9 @@ async fn proxy(
             &username,
             "account.login",
             "",
-            if reply.status.is_success() {
+            if is_mfa_challenge(&reply) {
+                "challenge"
+            } else if reply.status.is_success() {
                 "success"
             } else {
                 "denied"

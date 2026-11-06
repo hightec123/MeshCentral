@@ -2,7 +2,8 @@
 // dashboard authentication endpoints; device permissions remain in Rust.
 import { Database } from "bun:sqlite";
 import { betterAuth, type BetterAuthOptions } from "better-auth";
-import { username } from "better-auth/plugins";
+import { twoFactor, username } from "better-auth/plugins";
+import { createAuthMiddleware } from "better-auth/api";
 import { getMigrations } from "better-auth/db/migration";
 import { chmodSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -67,7 +68,35 @@ const options = {
       immutableUsername: true,
       usernameValidator: (value) => /^[a-zA-Z0-9._-]{3,64}$/.test(value),
     }),
+    twoFactor({ twoFactorCookieMaxAge: 300 }),
   ],
+  hooks: {
+    before: createAuthMiddleware(async (ctx) => {
+      if (
+        ctx.path === "/two-factor/verify-totp" ||
+        ctx.path === "/two-factor/verify-backup-code"
+      ) {
+        // Require a factor at every sign-in, including for direct API callers.
+        return { context: { body: { ...ctx.body, trustDevice: false } } };
+      }
+      if (ctx.path === "/sign-out" || ctx.path === "/sign-in/username") {
+        const cookie = ctx.context.createAuthCookie("two_factor");
+        const challenge = await ctx.getSignedCookie(
+          cookie.name,
+          ctx.context.secret,
+        );
+        if (challenge) {
+          await ctx.context.internalAdapter.deleteVerificationByIdentifier(
+            challenge,
+          );
+          await ctx.context.internalAdapter.deleteVerificationByIdentifier(
+            `2fa-attempts-${challenge}`,
+          );
+          ctx.setCookie(cookie.name, "", { ...cookie.attributes, maxAge: 0 });
+        }
+      }
+    }),
+  },
   session: {
     expiresIn: 8 * 3600,
     disableSessionRefresh: true,
@@ -92,7 +121,32 @@ export const auth = betterAuth(options);
 const context = await auth.$context;
 // Preserve the preview's restart-revokes-all-sessions behavior, including after
 // restoring an archive. Auth service exit also stops its Rust supervisor.
-database.exec('DELETE FROM "session"');
+const deleteChallenges = `DELETE FROM "verification"
+  WHERE "identifier" GLOB '2fa-*' AND "value" = ?`;
+// Better Auth sets the flag after verifying the enrollment code. Commit it
+// together with the factor and revocations so a crash cannot strand enrollment.
+database.exec(`
+  DELETE FROM "session";
+  DELETE FROM "verification" WHERE "identifier" GLOB '2fa-*';
+  CREATE TRIGGER IF NOT EXISTS "mcr_revoke_on_mfa_change"
+  AFTER UPDATE OF "twoFactorEnabled" ON "user"
+  WHEN coalesce(OLD."twoFactorEnabled", 0) <> coalesce(NEW."twoFactorEnabled", 0)
+  BEGIN
+    UPDATE "twoFactor" SET "verified" = 1
+      WHERE "userId" = NEW."id" AND NEW."twoFactorEnabled" = 1;
+    DELETE FROM "twoFactor"
+      WHERE "userId" = NEW."id" AND NEW."twoFactorEnabled" = 0;
+    DELETE FROM "session" WHERE "userId" = NEW."id";
+    ${deleteChallenges.replace("?", 'NEW."id"')};
+  END;
+  CREATE TRIGGER IF NOT EXISTS "mcr_clear_mfa_on_password_change"
+  AFTER UPDATE OF "password" ON "account"
+  WHEN OLD."password" IS NOT NEW."password"
+  BEGIN
+    ${deleteChallenges.replace("?", 'NEW."userId"')};
+  END;
+`);
+const clearChallenges = database.query(deleteChallenges);
 const internal = context.internalAdapter;
 const validName = (value: unknown): value is string =>
   typeof value === "string" && /^[a-z0-9._-]{3,64}$/.test(value);
@@ -105,8 +159,30 @@ const publicPaths = new Set([
   "revoke-session",
   "revoke-sessions",
   "revoke-other-sessions",
+  "two-factor/enable",
+  "two-factor/disable",
+  "two-factor/verify-totp",
+  "two-factor/verify-backup-code",
+  "two-factor/generate-backup-codes",
 ]);
-let pendingHashes = 0;
+let authWrites = Promise.resolve();
+let pendingWrites = 0;
+async function authWrite(work: () => Promise<Response>) {
+  // Username sign-in reads the user before verifying the password. Serialize
+  // writes so it cannot issue a session using a superseded MFA or password state.
+  if (pendingWrites >= 16) return response({ error: "Busy" }, 503);
+  pendingWrites++;
+  const result = authWrites.then(work);
+  authWrites = result.then(
+    () => {},
+    () => {},
+  );
+  try {
+    return await result;
+  } finally {
+    pendingWrites--;
+  }
+}
 const response = (value: unknown, status = 200) =>
   Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
 function privateCaller(request: Request) {
@@ -146,9 +222,7 @@ const server = Bun.serve({
         );
       }
       if (url.pathname === "/internal/identity" && request.method === "POST") {
-        if (pendingHashes >= 2) return response({ error: "Busy" }, 503);
-        pendingHashes++;
-        try {
+        return await authWrite(async () => {
           const body = await request.json();
           if (!validName(body.username))
             return response({ error: "Invalid username" }, 400);
@@ -213,9 +287,7 @@ const server = Bun.serve({
           )
             return response({ error: "Credential account is missing" }, 409);
           return response({ user_id: existing.user.id });
-        } finally {
-          pendingHashes--;
-        }
+        });
       }
       if (
         url.pathname === "/internal/revoke-user" &&
@@ -223,8 +295,11 @@ const server = Bun.serve({
       ) {
         const body = await request.json();
         if (typeof body.user_id !== "string") return response({}, 400);
-        await internal.deleteUserSessions(body.user_id);
-        return response({ success: true });
+        return await authWrite(async () => {
+          clearChallenges.run(body.user_id);
+          await internal.deleteUserSessions(body.user_id);
+          return response({ success: true });
+        });
       }
       if (
         url.pathname === "/internal/delete-user" &&
@@ -232,9 +307,12 @@ const server = Bun.serve({
       ) {
         const body = await request.json();
         if (typeof body.user_id !== "string") return response({}, 400);
-        await internal.deleteUserSessions(body.user_id);
-        await internal.deleteUser(body.user_id);
-        return response({ success: true });
+        return await authWrite(async () => {
+          clearChallenges.run(body.user_id);
+          await internal.deleteUserSessions(body.user_id);
+          await internal.deleteUser(body.user_id);
+          return response({ success: true });
+        });
       }
       if (url.pathname === "/internal/shutdown" && request.method === "POST") {
         setTimeout(() => {
@@ -247,7 +325,12 @@ const server = Bun.serve({
       const path = url.pathname.replace(/^\/api\/auth\//, "");
       if (!url.pathname.startsWith("/api/auth/") || !publicPaths.has(path))
         return response({}, 404);
-      return await auth.handler(request);
+      const handle = async () => {
+        const result = await auth.handler(request);
+        result.headers.set("Cache-Control", "no-store");
+        return result;
+      };
+      return await (request.method === "POST" ? authWrite(handle) : handle());
     } catch {
       return response({ error: "Authentication operation failed" }, 400);
     }

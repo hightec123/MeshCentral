@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, useAuth } from "./Auth";
+import { AccountMfa } from "./AccountMfa";
 import type { Operator } from "./Auth";
 type Group = {
   primary?: boolean;
@@ -452,6 +453,7 @@ export function ManagementPage({ section }: { section: string }) {
           </button>
         </form>
       )}
+      {section === "Account" && <AccountMfa />}
     </div>
   );
 }
