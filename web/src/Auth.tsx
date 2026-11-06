@@ -7,6 +7,11 @@ import {
 } from "react";
 import type { ReactNode, FormEvent } from "react";
 import {
+  EmailRecovery,
+  recoveryLink,
+  type RecoveryFlow,
+} from "./EmailRecovery";
+import {
   authClient,
   localhostPasskeyUrl,
   passkeysAvailable,
@@ -21,6 +26,7 @@ type Authentication = {
   csrf: string;
   logout: () => Promise<void>;
   refreshSession: () => Promise<void>;
+  emailRecovery: boolean;
 };
 const Context = createContext<Authentication | null>(null);
 export function useAuth() {
@@ -61,6 +67,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
   );
   const [loading, setLoading] = useState(true);
   const [setup, setSetup] = useState(false);
+  const [emailRecovery, setEmailRecovery] = useState(false);
+  const [recoveryFlow, setRecoveryFlow] = useState<RecoveryFlow | null>(
+    recoveryLink,
+  );
   const [error, setError] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -95,6 +105,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
       .then((data) => {
         setAuth(data.user ? data : null);
         setSetup(data.setup_required);
+        setEmailRecovery(Boolean(data.email_recovery));
       })
       .catch((e) => {
         if (!controller.signal.aborted) setError(e.message);
@@ -120,6 +131,21 @@ export function AuthGate({ children }: { children: ReactNode }) {
       channel.close();
     };
   }, [readSession]);
+  useEffect(() => {
+    const openRecoveryLink = () => {
+      const flow = recoveryLink();
+      if (!flow) return;
+      setRecoveryFlow(flow);
+      window.history.replaceState(
+        null,
+        "",
+        window.location.pathname + window.location.search,
+      );
+    };
+    openRecoveryLink();
+    window.addEventListener("hashchange", openRecoveryLink);
+    return () => window.removeEventListener("hashchange", openRecoveryLink);
+  }, []);
   const logout = useCallback(async () => {
     window.dispatchEvent(new Event("mcr-auth-revoking"));
     const channel = new BroadcastChannel("meshcentral-dashboard-auth");
@@ -212,6 +238,17 @@ export function AuthGate({ children }: { children: ReactNode }) {
       setBusy(false);
     }
   }
+  if (recoveryFlow)
+    return (
+      <EmailRecovery
+        key={recoveryFlow.kind === "request" ? "request" : recoveryFlow.token}
+        flow={recoveryFlow}
+        close={() => {
+          setRecoveryFlow(null);
+          void readSession().catch(() => setAuth(null));
+        }}
+      />
+    );
   if (loading)
     return (
       <div className="auth-shell">
@@ -220,7 +257,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
     );
   if (auth)
     return (
-      <Context.Provider value={{ ...auth, logout, refreshSession }}>
+      <Context.Provider
+        value={{ ...auth, logout, refreshSession, emailRecovery }}
+      >
         {children}
       </Context.Provider>
     );
@@ -331,6 +370,16 @@ export function AuthGate({ children }: { children: ReactNode }) {
             )}
             {localPasskeyUrl && (
               <a href={localPasskeyUrl}>Open localhost to use a passkey</a>
+            )}
+            {emailRecovery && (
+              <button
+                className="button"
+                type="button"
+                disabled={busy}
+                onClick={() => setRecoveryFlow({ kind: "request" })}
+              >
+                Forgot password?
+              </button>
             )}
           </form>
         )}

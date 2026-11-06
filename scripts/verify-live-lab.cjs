@@ -7,21 +7,69 @@ const { createRequire } = require("node:module");
 const { chromium, devices } = require("../web/node_modules/playwright");
 const { expect } = require("../web/node_modules/@playwright/test");
 const webRequire = createRequire(require.resolve("../web/package.json"));
+const mailpit = "http://127.0.0.1:18025/api/v1";
+async function recoveryMessages(email) {
+  const response = await fetch(mailpit + "/messages");
+  if (!response.ok) throw new Error("Could not read the disposable lab inbox.");
+  const { messages } = await response.json();
+  return messages.filter((message) =>
+    message.To?.some((to) => to.Address === email),
+  );
+}
+async function recoveryMailLink(email, kind, origin) {
+  const subject =
+    kind === "verify-recovery"
+      ? "Confirm your recovery email"
+      : "Reset your password";
+  let message;
+  await expect
+    .poll(
+      async () => {
+        message = (await recoveryMessages(email)).find((entry) =>
+          entry.Subject.endsWith(subject),
+        );
+        return Boolean(message);
+      },
+      { timeout: 15000 },
+    )
+    .toBe(true);
+  const response = await fetch(
+    mailpit + "/message/" + encodeURIComponent(message.ID),
+  );
+  if (!response.ok) throw new Error("Could not read the recovery email.");
+  const { Text } = await response.json();
+  const href = Text.split(/\r?\n/).find((line) =>
+    line.startsWith(origin + "/#" + kind + "="),
+  );
+  if (!href)
+    throw new Error("Recovery email did not point to the expected lab.");
+  return new URL(href);
+}
 async function main() {
   const root = path.join(__dirname, "..");
   const flags = process.argv.slice(2);
   const linux = flags.includes("--linux");
   const mfa = flags.includes("--mfa");
   const passkey = flags.includes("--passkey");
-  if (flags.some((flag) => !["--linux", "--mfa", "--passkey"].includes(flag)))
-    throw new Error("Supported flags: --linux, --mfa and --passkey.");
+  const emailRecovery = flags.includes("--recovery");
+  if (
+    flags.some(
+      (flag) => !["--linux", "--mfa", "--passkey", "--recovery"].includes(flag),
+    ) ||
+    (passkey && emailRecovery)
+  )
+    throw new Error(
+      "Use --linux or --mfa with either --passkey or --recovery.",
+    );
   const linuxIdentity = linux
     ? JSON.parse(
         fs.readFileSync(path.join(root, ".local/linux-agent/identity.json")),
       )
     : null;
   const prefix = linux ? "linux-" : "";
-  const evidencePrefix = prefix + (passkey ? "passkey-" : mfa ? "mfa-" : "");
+  const evidencePrefix =
+    prefix +
+    (emailRecovery ? "recovery-" : passkey ? "passkey-" : mfa ? "mfa-" : "");
   const credentials = JSON.parse(
     fs.readFileSync(
       path.join(root, ".local/" + prefix + "operator-login.json"),
@@ -70,6 +118,7 @@ async function main() {
   });
   let original, csrf;
   let admin, adminCsrf, operator, totp, recoveryCode;
+  let recoveryContext, mailbox;
   const result = {};
   const dashboard = page.getByRole("heading", { name: "Devices", exact: true });
   async function signIn(account, factor) {
@@ -113,7 +162,7 @@ async function main() {
     expect(session.user.username).toBe(operator.username);
   }
   try {
-    if (mfa || passkey) {
+    if (mfa || passkey || emailRecovery) {
       admin = await browser.newContext({ baseURL: credentials.url });
       const headers = { Origin: credentials.url };
       const login = await admin.request.post("/api/v1/auth/login", {
@@ -127,7 +176,11 @@ async function main() {
       adminCsrf = (await login.json()).csrf;
       const account = {
         username:
-          (passkey ? "passkey-lab-" : "mfa-lab-") + randomUUID().slice(0, 8),
+          (emailRecovery
+            ? "recovery-lab-"
+            : passkey
+              ? "passkey-lab-"
+              : "mfa-lab-") + randomUUID().slice(0, 8),
         password: randomBytes(24).toString("base64url"),
       };
       const create = await admin.request.post("/api/v1/users", {
@@ -210,6 +263,62 @@ async function main() {
       await page.getByRole("button", { name: "Sign out", exact: true }).click();
       await signInWithPasskey();
       result.passkey_sign_in = true;
+    }
+    if (emailRecovery) {
+      mailbox = operator.username + "@recovery.test";
+      recoveryContext = await browser.newContext({ baseURL: credentials.url });
+      await page.getByRole("button", { name: "Account", exact: true }).click();
+      await page.getByLabel("New recovery email").fill(mailbox);
+      await page
+        .getByLabel("Password for recovery email")
+        .fill(operator.password);
+      await page
+        .getByRole("button", { name: "Send confirmation", exact: true })
+        .click();
+      await expect(
+        page.getByText("Check your inbox to confirm the recovery address."),
+      ).toBeVisible();
+      const before = await context.request.get(
+        credentials.url + "/api/auth/recovery-email",
+      );
+      expect((await before.json()).email).toBeNull();
+      const unverified = await recoveryContext.request.post(
+        "/api/auth/request-password-reset",
+        {
+          headers: { Origin: credentials.url },
+          data: { email: mailbox },
+        },
+      );
+      expect(unverified.ok()).toBe(true);
+      expect(
+        (await recoveryMessages(mailbox)).every(
+          (message) => !message.Subject.endsWith("Reset your password"),
+        ),
+      ).toBe(true);
+      const confirm = await recoveryMailLink(
+        mailbox,
+        "verify-recovery",
+        credentials.url,
+      );
+      const emailPage = await recoveryContext.newPage();
+      await emailPage.goto(confirm.href);
+      await emailPage
+        .getByRole("button", { name: "Confirm email", exact: true })
+        .click();
+      await expect(
+        emailPage.getByText("Your recovery email is confirmed."),
+      ).toBeVisible();
+      const confirmed = await context.request.get(
+        credentials.url + "/api/auth/recovery-email",
+      );
+      expect((await confirmed.json()).email).toBe(mailbox);
+      expect(
+        (await recoveryContext.request.get("/api/v1/devices")).status(),
+      ).toBe(401);
+      await emailPage.close();
+      result.recovery_email_confirmed = true;
+      result.unverified_address_ineligible = true;
+      await page.getByRole("button", { name: "Devices", exact: true }).click();
     }
     const auth = await (
       await context.request.get(credentials.url + "/api/v1/auth/session")
@@ -533,20 +642,111 @@ async function main() {
         ),
       );
     }, proofSockets);
-    const secondTab = await context.newPage();
-    await secondTab.goto(credentials.url);
-    await expect(
-      secondTab.getByRole("heading", { name: "Devices", exact: true }),
-    ).toBeVisible();
-    await secondTab
-      .getByRole("button", { name: "Sign out", exact: true })
-      .click();
-    await expect(
-      secondTab.getByRole("heading", { name: "Sign in to your workspace" }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("heading", { name: "Sign in to your workspace" }),
-    ).toBeVisible();
+    let replacementPassword;
+    if (emailRecovery) {
+      const headers = { Origin: credentials.url };
+      const unknown = await recoveryContext.request.post(
+        "/api/auth/request-password-reset",
+        {
+          headers,
+          data: { email: "unknown-" + mailbox },
+        },
+      );
+      const forgot = await recoveryContext.newPage();
+      await forgot.goto(credentials.url);
+      await forgot
+        .getByRole("button", { name: "Forgot password?", exact: true })
+        .click();
+      await forgot.getByLabel("Recovery email", { exact: true }).fill(mailbox);
+      const requested = forgot.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname ===
+          "/api/auth/request-password-reset",
+      );
+      await forgot
+        .getByRole("button", { name: "Send reset link", exact: true })
+        .click();
+      await expect(
+        forgot.getByText(
+          "If this address is registered for recovery, you’ll receive a reset link.",
+        ),
+      ).toBeVisible();
+      expect(await (await requested).json()).toEqual(await unknown.json());
+      const reset = await recoveryMailLink(
+        mailbox,
+        "reset-password",
+        credentials.url,
+      );
+      const resetPage = await recoveryContext.newPage();
+      await resetPage.goto(reset.href);
+      replacementPassword = randomBytes(24).toString("base64url");
+      await resetPage
+        .getByLabel("New password", { exact: true })
+        .fill(replacementPassword);
+      await resetPage
+        .getByLabel("Confirm new password", { exact: true })
+        .fill(replacementPassword);
+      await resetPage
+        .getByRole("button", { name: "Reset password", exact: true })
+        .click();
+      await expect(
+        resetPage.getByText(
+          "Your password was reset. Sign in with your new password.",
+        ),
+      ).toBeVisible();
+      const token = new URLSearchParams(reset.hash.slice(1)).get(
+        "reset-password",
+      );
+      const replay = await recoveryContext.request.post(
+        "/api/auth/reset-password",
+        {
+          headers,
+          data: { token, newPassword: replacementPassword },
+        },
+      );
+      expect(replay.ok()).toBe(false);
+      expect(
+        (await recoveryContext.request.get("/api/v1/devices")).status(),
+      ).toBe(401);
+      expect(
+        (
+          await recoveryContext.request.post("/api/v1/auth/login", {
+            headers,
+            data: operator,
+          })
+        ).status(),
+      ).toBe(401);
+      const audit = await admin.request.get("/api/v1/audit");
+      expect(audit.ok()).toBe(true);
+      const { events } = await audit.json();
+      expect(
+        events.some(
+          (entry) =>
+            entry.actor === operator.username &&
+            entry.action === "account.recovery.reset",
+        ),
+      ).toBe(true);
+      result.email_password_reset = true;
+      result.reset_token_single_use = true;
+      result.old_password_denied = true;
+      result.unknown_address_response_matches = true;
+    } else {
+      const secondTab = await context.newPage();
+      await secondTab.goto(credentials.url);
+      await expect(
+        secondTab.getByRole("heading", { name: "Devices", exact: true }),
+      ).toBeVisible();
+      await secondTab
+        .getByRole("button", { name: "Sign out", exact: true })
+        .click();
+      await expect(
+        secondTab.getByRole("heading", { name: "Sign in to your workspace" }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("heading", { name: "Sign in to your workspace" }),
+      ).toBeVisible();
+      await secondTab.close();
+    }
     await expect
       .poll(() => page.evaluate(() => window.mcrLogoutProof.closed), {
         timeout: 5000,
@@ -555,12 +755,21 @@ async function main() {
     expect(
       (await context.request.get(credentials.url + "/api/v1/devices")).status(),
     ).toBe(401);
-    await secondTab.close();
-    result.logout_closes_native_remote_sessions = true;
-    if (passkey) {
+    if (emailRecovery) {
+      result.reset_closes_native_remote_sessions = true;
+      await page.reload();
+      await signIn(
+        { username: operator.username, password: replacementPassword },
+        mfa ? "totp" : undefined,
+      );
+      result.new_password_sign_in = true;
+      if (mfa) result.reset_preserves_mfa = true;
+    } else if (passkey) {
+      result.logout_closes_native_remote_sessions = true;
       await signInWithPasskey();
       result.passkey_sign_in_after_logout = true;
     } else {
+      result.logout_closes_native_remote_sessions = true;
       await signIn(operator ?? credentials, mfa ? "recovery" : undefined);
       if (mfa) result.recovery_code_sign_in = true;
     }
@@ -580,7 +789,11 @@ async function main() {
     expect(
       connected.devices.find((device) => device.id === expected)?.status,
     ).toBe("online");
-    result.agent_stays_online_after_logout = true;
+    result[
+      emailRecovery
+        ? "agent_stays_online_after_reset"
+        : "agent_stays_online_after_logout"
+    ] = true;
     if (errors.length)
       throw new Error(
         `Browser reported ${errors.length} errors. Failed requests: ${failedPaths.join(", ")}`,
@@ -600,11 +813,11 @@ async function main() {
     console.log(JSON.stringify(result));
   } finally {
     if (original && csrf)
-      await context.request
+      await (admin?.request ?? context.request)
         .patch(
           credentials.url + "/api/v1/devices/" + encodeURIComponent(expected),
           {
-            headers: { "X-CSRF-Token": csrf },
+            headers: { "X-CSRF-Token": adminCsrf ?? csrf },
             data: {
               alias: original.alias,
               notes: original.notes,
@@ -623,6 +836,22 @@ async function main() {
         expect(removed.ok()).toBe(true);
         await admin.request.post("/api/auth/sign-out", { headers, data: {} });
       }
+      if (mailbox) {
+        const ids = (await recoveryMessages(mailbox)).map(
+          (message) => message.ID,
+        );
+        if (ids.length) {
+          const removed = await fetch(mailpit + "/messages", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ IDs: ids }),
+          });
+          if (!removed.ok)
+            throw new Error(
+              "Could not clean up the disposable recovery messages.",
+            );
+        }
+      }
     } finally {
       await browser.close();
     }
@@ -630,6 +859,17 @@ async function main() {
 }
 main().catch((error) => {
   // Playwright request diagnostics can include authenticated request headers.
-  console.error(String(error.message ?? error).split("\n")[0]);
+  const location = String(error.stack).match(
+    /verify-live-lab\.cjs:\d+:\d+/,
+  )?.[0];
+  console.error(
+    String(error.message ?? error)
+      .split("\n")[0]
+      .replace(
+        /(verify-recovery|reset-password)=[A-Za-z0-9_-]+/g,
+        "$1=[redacted]",
+      ),
+    location ?? "",
+  );
   process.exitCode = 1;
 });

@@ -8,8 +8,9 @@ import { getMigrations } from "better-auth/db/migration";
 import { passkey } from "@better-auth/passkey";
 import { chmodSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
+import { emailRecovery, recoveryAddress } from "./recovery";
 
 process.umask(0o077);
 const directory = process.env.MCR_AUTH_DATA_DIR;
@@ -44,26 +45,28 @@ const passkeyOrigin = secureConsole
   : `http://localhost${base.port ? ":" + base.port : ""}`;
 const passkeyCookie = "webauthn_challenge";
 const registrationPasswordHeader = "x-mcr-passkey-password";
+const trustedOrigins = secureConsole
+  ? [origin]
+  : [
+      origin,
+      `http://localhost:${base.port}`,
+      `http://127.0.0.1:${base.port}`,
+      `http://[::1]:${base.port}`,
+      "http://127.0.0.1:5173",
+    ];
 const options = {
   appName: "MeshCentral Rust",
   baseURL: origin,
   basePath: "/api/auth",
   secret: secrets.secret,
   database,
-  trustedOrigins: secureConsole
-    ? [origin]
-    : [
-        origin,
-        `http://localhost:${base.port}`,
-        `http://127.0.0.1:${base.port}`,
-        `http://[::1]:${base.port}`,
-        "http://127.0.0.1:5173",
-      ],
+  trustedOrigins,
   emailAndPassword: {
     enabled: true,
     disableSignUp: true,
     minPasswordLength: 12,
     maxPasswordLength: 128,
+    revokeSessionsOnPasswordReset: true,
     password: {
       hash: async (password) =>
         Bun.password.hash(password, {
@@ -164,7 +167,10 @@ const options = {
     enabled: true,
     window: 60,
     max: 100,
-    customRules: { "/sign-in/username": { window: 60, max: 60 } },
+    customRules: {
+      "/sign-in/username": { window: 60, max: 60 },
+      "/reset-password": { window: 60, max: 12 },
+    },
   },
   advanced: {
     cookiePrefix: secrets.cookie_prefix,
@@ -175,6 +181,7 @@ const options = {
 } satisfies BetterAuthOptions;
 const migrations = await getMigrations(options);
 await migrations.runMigrations();
+const recovery = emailRecovery(database, origin);
 export const auth = betterAuth(options);
 const context = await auth.$context;
 // Preserve the preview's restart-revokes-all-sessions behavior, including after
@@ -238,7 +245,30 @@ const publicPaths = new Set([
   "passkey/verify-authentication",
   "passkey/list-user-passkeys",
   "passkey/delete-passkey",
+  "recovery-email",
+  "verify-recovery-email",
+  "request-password-reset",
+  "reset-password",
 ]);
+const recoveryPaths = new Set([
+  "recovery-email",
+  "verify-recovery-email",
+  "request-password-reset",
+  "reset-password",
+]);
+const recoveryAttempts = new Map<string, { count: number; until: number }>();
+function allowRecoveryAttempt(key: string, limit: number) {
+  const now = Date.now();
+  const attempts = recoveryAttempts.get(key);
+  const window =
+    attempts && attempts.until > now
+      ? attempts
+      : { count: 0, until: now + 60000 };
+  if (window.count >= limit) return false;
+  window.count++;
+  recoveryAttempts.set(key, window);
+  return true;
+}
 let authWrites = Promise.resolve();
 let pendingWrites = 0;
 async function authWrite(work: () => Promise<Response>) {
@@ -382,6 +412,8 @@ const server = Bun.serve({
         const body = await request.json();
         if (typeof body.user_id !== "string") return response({}, 400);
         return await authWrite(async () => {
+          recoveryAttempts.delete("user:" + body.user_id);
+          recovery.remove(body.user_id);
           clearChallenges.run(body.user_id);
           await internal.deleteUserSessions(body.user_id);
           await internal.deleteUser(body.user_id);
@@ -399,6 +431,20 @@ const server = Bun.serve({
       const path = url.pathname.replace(/^\/api\/auth\//, "");
       if (!url.pathname.startsWith("/api/auth/") || !publicPaths.has(path))
         return response({}, 404);
+      if (recoveryPaths.has(path)) {
+        if (!recovery.enabled)
+          return response({ message: "Email recovery is unavailable." }, 503);
+        if (
+          request.method !== "POST" &&
+          !(path === "recovery-email" && request.method === "GET")
+        )
+          return response({}, 405);
+        if (
+          request.method === "POST" &&
+          !trustedOrigins.includes(request.headers.get("origin") ?? "")
+        )
+          return response({}, 403);
+      }
       if (path.startsWith("passkey/")) {
         if (
           !passkeyOrigin ||
@@ -417,6 +463,86 @@ const server = Bun.serve({
       }
       const handle = async () => {
         let input = request;
+        let resetUser: string | undefined;
+        if (path === "recovery-email") {
+          const active = await session(request.headers.get("cookie") ?? "");
+          if (!active) return response({}, 401);
+          if (request.method === "GET")
+            return response({ email: recovery.address(active.user_id) });
+          const body = await request.json();
+          const email =
+            body.email === null ? null : recoveryAddress(body.email);
+          if (
+            (body.email !== null && !email) ||
+            typeof body.password !== "string" ||
+            !body.password ||
+            body.password.length > 128
+          )
+            return response(
+              { message: "Enter a valid email address and current password." },
+              400,
+            );
+          if (!allowRecoveryAttempt("user:" + active.user_id, 6))
+            return response(
+              { message: "Wait a minute before trying again." },
+              429,
+            );
+          const credential = await internal.findCredentialAccount(
+            active.user_id,
+          );
+          if (
+            !credential?.password ||
+            !(await context.password.verify({
+              hash: credential.password,
+              password: body.password,
+            }))
+          )
+            return response({ message: "Current password is incorrect." }, 401);
+          if (email) recovery.requestConfirmation(active.user_id, email);
+          else recovery.remove(active.user_id);
+          return response({ status: true });
+        }
+        if (path === "verify-recovery-email") {
+          if (!allowRecoveryAttempt("verify", 60)) return response({}, 429);
+          const { token } = await request.json();
+          if (
+            typeof token !== "string" ||
+            !/^[A-Za-z0-9_-]{43}$/.test(token) ||
+            !recovery.confirm(token)
+          )
+            return response(
+              { message: "This confirmation link is invalid or expired." },
+              400,
+            );
+          return response({ status: true });
+        }
+        if (path === "request-password-reset") {
+          if (!allowRecoveryAttempt("request", 12)) return response({}, 429);
+          const body = await request.json();
+          const email = recoveryAddress(body.email);
+          if (!email)
+            return response({ message: "Enter a valid email address." }, 400);
+          const token = randomBytes(24).toString("base64url");
+          const userId = recovery.resetUser(email);
+          if (userId) {
+            await internal.createVerificationValue({
+              identifier: "reset-password:" + token,
+              value: userId,
+              expiresAt: new Date(Date.now() + 900000),
+            });
+            recovery.sendReset(userId, token);
+          }
+          return response({
+            status: true,
+            message:
+              "If this address is registered for recovery, you’ll receive a reset link.",
+          });
+        }
+        if (path === "reset-password") {
+          const { token } = await request.clone().json();
+          if (typeof token === "string" && /^[A-Za-z0-9_-]{32}$/.test(token))
+            resetUser = recovery.usernameForReset(token);
+        }
         if (
           path === "passkey/verify-registration" &&
           request.method === "POST"
@@ -452,6 +578,8 @@ const server = Bun.serve({
           });
         }
         const result = await auth.handler(input);
+        if (result.ok && resetUser)
+          result.headers.set("x-mcr-reset-user", resetUser);
         result.headers.set("Cache-Control", "no-store");
         return result;
       };

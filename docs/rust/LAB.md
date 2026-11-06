@@ -29,6 +29,14 @@ acceptance on `http://localhost:3000`. It uses a Chromium virtual authenticator
 and checks that logout closes all three relay types established after passkey
 sign-in. Add `--linux` for the Linux lab.
 
+For recovery acceptance, start Mailpit on `127.0.0.1:11025` for SMTP and
+`127.0.0.1:18025` for its inbox API. Start each lab server with
+`MCR_SMTP_URL=smtp://127.0.0.1:11025` and
+`MCR_SMTP_FROM=meshcentral@recovery.test`. Run
+`node scripts/verify-live-lab.cjs --mfa --recovery`, adding `--linux` for
+the Linux lab. The helper uses disposable accounts and mailboxes and checks
+that an email password reset closes terminal, file and desktop relays.
+
 After stopping these processes, start them again in separate terminals from the
 repository root:
 

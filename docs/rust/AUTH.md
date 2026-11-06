@@ -67,6 +67,24 @@ Removing a passkey revokes every dashboard sign-in for that account and closes
 the remote sessions they own. Keep access to your password and, if enrolled in
 MFA, an authenticator or recovery code so you can sign in if you lose a device.
 
+## Recover an account by email
+
+Set `MCR_SMTP_URL` and `MCR_SMTP_FROM` in the server's environment to enable
+email recovery. Use an `smtps://` connection or an `smtp://` server with
+STARTTLS. Unauthenticated loopback SMTP also works for a local mail catcher.
+The service sends links to the configured console origin. Keep SMTP credentials
+in the server's private environment.
+
+1. While signed in, open **Account → Recovery email**. Enter your address and
+   current password, then select **Send confirmation**.
+2. Open the email and confirm the address within 30 minutes.
+3. If you forget your password, select **Forgot password?** and use the
+   single-use link from the confirmed mailbox within 15 minutes.
+
+A reset signs out the affected account and closes its terminal, file and
+desktop sessions. The account keeps its MFA enrollment and passkeys. A restart
+or backup restore clears outstanding confirmation and reset links.
+
 ## Serve the console over HTTPS
 
 Supply a PEM certificate chain and matching private key for the exact origin
@@ -157,7 +175,7 @@ No database, credential or signing secret is committed.
 | --- | --- |
 | `operators.json` | Rust roles/group grants and immutable Better Auth user IDs |
 | `dashboard-auth.json` | Signing/service secrets and a per-instance cookie prefix |
-| `dashboard-auth.sqlite` | Better Auth users, credential hashes, sessions, passkey public keys, and encrypted authenticator secrets and recovery codes |
+| `dashboard-auth.sqlite` | Better Auth users, credential hashes, sessions, passkey public keys, verified recovery addresses, and encrypted authenticator secrets and recovery codes |
 
 The encrypted [backup/restore workflow](RECOVERY.md) includes both auth files and
 keeps the original credentials/mappings. Database backups require a stopped server

@@ -22,7 +22,8 @@ upstream source alone does not imply support in the Rust server.
 | Authenticator-app MFA and recovery codes | Verified with stock macOS and Linux agent binaries; password-only access denied, authenticator and recovery sign-in accepted, logout closes relays while agents stay online |
 | Console HTTPS and WSS | Verified Secure cookies, wrong-origin denial and WSS terminal logout with a stock macOS agent; production ingress and deployment acceptance pending |
 | Passkeys/WebAuthn | Verified with Chromium virtual authenticators and stock macOS/Linux agents. Logout closes terminal, files and desktop. |
-| SSO, recovery email and invitations | Planned |
+| Email account recovery | Verified on macOS and Linux through local SMTP. Confirmed mailboxes receive single-use reset links. Reset preserves MFA and closes terminal, file and desktop relays. |
+| SSO and invitations | Planned |
 | Intel AMT/CIRA, Wake-on-LAN, power control | Planned |
 | Sharing, consent, session recording, chat and notifications | Planned |
 | Tasks, scripting, TCP/UDP forwarding, routing and WebRTC | Planned |
@@ -36,7 +37,7 @@ Admission supports up to 64 groups and 32 approved agent identities per group;
 the native listener allows 32 sockets and eight concurrent handshakes.
 
 Windows live acceptance is pending a disposable lab VM (none is currently
-available). Next independent implementation targets are email recovery,
+available). Next independent implementation targets are SSO, invitations,
 and scoped automation/advanced connectivity. Existing
 agent trust/database migration and production rollout remain separate release gates.
 See [AUTH.md](AUTH.md) for the auth boundary, migration, logout and recovery behavior.

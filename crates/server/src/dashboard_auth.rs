@@ -39,6 +39,7 @@ pub struct DashboardAuth {
     client: reqwest::Client,
     url: String,
     secrets: Secrets,
+    pub email_recovery: bool,
 }
 pub struct AuthProcess {
     child: Child,
@@ -72,6 +73,10 @@ pub(crate) fn allowed_path(path: &str) -> bool {
             | "passkey/verify-authentication"
             | "passkey/list-user-passkeys"
             | "passkey/delete-passkey"
+            | "recovery-email"
+            | "verify-recovery-email"
+            | "request-password-reset"
+            | "reset-password"
     )
 }
 
@@ -150,6 +155,9 @@ impl AuthProcess {
                 .build()?,
             url: format!("http://127.0.0.1:{port}"),
             secrets,
+            email_recovery: ["MCR_SMTP_URL", "MCR_SMTP_FROM"]
+                .iter()
+                .all(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty())),
         });
         for (user, hash, id) in operators.identity_records() {
             let result = bridge
@@ -243,7 +251,12 @@ impl DashboardAuth {
             .context("Better Auth unavailable")?;
         let status = response.status();
         let mut output = HeaderMap::new();
-        for name in ["set-cookie", "content-type", "cache-control"] {
+        for name in [
+            "set-cookie",
+            "content-type",
+            "cache-control",
+            "x-mcr-reset-user",
+        ] {
             for value in response.headers().get_all(name) {
                 output.append(name, value.clone());
             }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, useAuth } from "./Auth";
 import { AccountMfa } from "./AccountMfa";
 import { AccountPasskeys } from "./AccountPasskeys";
+import { AccountRecoveryEmail } from "./EmailRecovery";
 import type { Operator } from "./Auth";
 type Group = {
   primary?: boolean;
@@ -24,7 +25,7 @@ type Audit = {
   outcome: string;
 };
 export function ManagementPage({ section }: { section: string }) {
-  const { user, csrf } = useAuth();
+  const { user, csrf, emailRecovery } = useAuth();
   const [groups, setGroups] = useState<Group[]>([]);
   const [users, setUsers] = useState<Operator[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -456,6 +457,7 @@ export function ManagementPage({ section }: { section: string }) {
       )}
       {section === "Account" && <AccountMfa />}
       {section === "Account" && <AccountPasskeys />}
+      {section === "Account" && emailRecovery && <AccountRecoveryEmail />}
     </div>
   );
 }

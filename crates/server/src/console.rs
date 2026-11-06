@@ -136,12 +136,20 @@ async fn session(
     } else {
         None
     };
-    Ok(Json(match principal {
+    let mut view = match principal {
         Some(p) => json!({"user":p.user,"csrf":p.csrf,"setup_required":false}),
         None => {
             json!({"user":null,"csrf":null,"setup_required":state.operators.as_ref().is_none_or(|s|!s.initialized())})
         }
-    }))
+    };
+    view["email_recovery"] = json!(
+        state
+            .operators
+            .as_ref()
+            .and_then(|store| store.auth())
+            .is_some_and(|auth| auth.email_recovery)
+    );
+    Ok(Json(view))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -383,6 +391,11 @@ async fn proxy(
         path,
         "two-factor/verify-totp" | "two-factor/verify-backup-code"
     );
+    let recovery_settings = path == "recovery-email";
+    let recovery_post = matches!(
+        path,
+        "verify-recovery-email" | "request-password-reset" | "reset-password"
+    );
     let passkey_settings = matches!(
         path,
         "passkey/generate-register-options"
@@ -405,12 +418,12 @@ async fn proxy(
     ]
     .contains(&path);
     if !["GET", "POST"].contains(&method)
-        || ((mutation || mfa_settings || mfa_verify) && method != "POST")
+        || ((mutation || mfa_settings || mfa_verify || recovery_post) && method != "POST")
         || (path.starts_with("passkey/") && passkey_get != (method == "GET"))
     {
         return Err(bad("Unsupported auth method."));
     }
-    let principal = if mfa_settings || mfa_verify || passkey_settings {
+    let principal = if mfa_settings || mfa_verify || passkey_settings || recovery_settings {
         store
             .dashboard_principal(cookie(headers))
             .await
@@ -425,7 +438,7 @@ async fn proxy(
     } else {
         None
     };
-    if (mfa_settings || passkey_settings) && principal.is_none() {
+    if (mfa_settings || passkey_settings || recovery_settings) && principal.is_none() {
         return Err(unauthorized());
     }
     if path == "sign-out"
@@ -451,6 +464,18 @@ async fn proxy(
         .request(path, method, headers, body.clone())
         .await
         .map_err(|_| auth_unavailable())?;
+    let reset_user = reply.headers.remove("x-mcr-reset-user");
+    if reply.status.is_success() && path == "reset-password" {
+        store.revalidate_dashboard_sessions().await;
+        if let Some(rt) = &state.runtime {
+            rt.relays.close_inactive(&store);
+        }
+        if let Some(username) = reset_user.as_ref().and_then(|value| value.to_str().ok()) {
+            let _ = store
+                .audit
+                .record(username, "account.recovery.reset", "", "success");
+        }
+    }
     if reply.status.is_success() && path == "passkey/verify-authentication" {
         let principal = store
             .dashboard_principal(&reply_cookie(&reply))
